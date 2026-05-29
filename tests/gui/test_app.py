@@ -1,5 +1,7 @@
+import numpy as np
 import pytest
 from qtpy.QtWidgets import QApplication
+import sleap_io as sio
 
 from sleap.gui.app import MainWindow
 from sleap.gui.commands import *
@@ -460,3 +462,140 @@ def test_menu_actions(qtbot, centered_pair_predictions: Labels):
 
     # Toggle instance visibility with shortcut, showing instances
     toggle_and_verify_visibility(True)
+
+
+def test_prediction_frame_selection_expands_current_session(
+    qtbot,
+    centered_pair_labels: Labels,
+    small_robot_mp4_vid: Video,
+    small_robot_3_frame_vid: Video,
+):
+    app = MainWindow(labels=centered_pair_labels, no_usage_data=True)
+    labels_add_video(app.labels, small_robot_mp4_vid)
+    labels_add_video(app.labels, small_robot_3_frame_vid)
+
+    cameras = [
+        sio.Camera(name="front"),
+        sio.Camera(name="side"),
+        sio.Camera(name="top"),
+    ]
+    session = sio.RecordingSession(camera_group=sio.CameraGroup(cameras=cameras))
+    for video, camera in zip(app.labels.videos[:3], cameras):
+        session.add_video(video, camera)
+    app.labels.sessions.append(session)
+
+    app.state["video"] = app.labels.videos[0]
+    app.state["frame_idx"] = 1
+    app.state["frame_range"] = (0, 2)
+
+    selection = app._get_frames_for_prediction()
+
+    assert list(selection["frame"].keys()) == app.labels.videos[:3]
+    assert all(frames == [1] for frames in selection["frame"].values())
+    assert list(selection["video"].keys()) == app.labels.videos[:3]
+    assert list(selection["random_video"].keys()) == app.labels.videos[:3]
+
+    app.player.cleanup()
+
+
+def test_secondary_view_double_click_creates_instance(
+    qtbot,
+    centered_pair_predictions: Labels,
+    small_robot_mp4_vid: Video,
+):
+    """Double-clicking a prediction in the secondary camera view creates a user instance.
+
+    Regression test: secondary_view.instanceDoubleClicked was not connected to
+    _handle_instance_double_click, so double-clicking in the right-side view did nothing.
+    """
+    app = MainWindow(labels=centered_pair_predictions, no_usage_data=True)
+    qtbot.addWidget(app)
+
+    labels_add_video(app.labels, small_robot_mp4_vid)
+
+    cameras = [sio.Camera(name="cam0"), sio.Camera(name="cam1")]
+    session = sio.RecordingSession(camera_group=sio.CameraGroup(cameras=cameras))
+    primary_video = app.labels.videos[0]
+    for video, camera in zip([primary_video, small_robot_mp4_vid], cameras):
+        session.add_video(video, camera)
+    app.labels.sessions.append(session)
+
+    app.state["video"] = primary_video
+    app.state["frame_idx"] = 0
+
+    skeleton = app.labels.skeleton
+    secondary_lf = app.labels.find(small_robot_mp4_vid, 0, return_new=True)[0]
+    pred_instance = PredictedInstance(
+        points=np.zeros((len(skeleton.nodes), 2)),
+        skeleton=skeleton,
+        score=0.9,
+    )
+    secondary_lf.instances.append(pred_instance)
+    if secondary_lf not in app.labels:
+        app.labels.append(secondary_lf)
+
+    app.player.set_hovered_session_view(app.player.secondary_view)
+
+    user_count_before = sum(
+        1
+        for inst in secondary_lf.instances
+        if not isinstance(inst, PredictedInstance)
+    )
+
+    app.player.secondary_view.instanceDoubleClicked.emit(pred_instance, None)
+
+    user_count_after = sum(
+        1
+        for inst in secondary_lf.instances
+        if not isinstance(inst, PredictedInstance)
+    )
+    assert user_count_after == user_count_before + 1
+
+
+def test_external_preview_double_click_creates_instance(
+    qtbot,
+    centered_pair_labels: Labels,
+):
+    """Double-clicking a linked-file preview prediction creates a user instance."""
+    app = MainWindow(labels=centered_pair_labels, no_usage_data=True)
+    qtbot.addWidget(app)
+
+    app.state["video"] = app.labels.video
+    app.state["frame_idx"] = 0
+    target_lf = app.labels.find(app.labels.video, 0, return_new=True)[0]
+    app.state["labeled_frame"] = target_lf
+
+    skeleton = sio.Skeleton()
+    for node_name in app.labels.skeleton.node_names:
+        skeleton.add_node(node_name)
+    preview_pred = PredictedInstance(
+        points=np.zeros((len(skeleton.nodes), 2)),
+        skeleton=skeleton,
+        score=0.9,
+    )
+    assert preview_pred not in target_lf.instances
+
+    app.player.addInstance(
+        preview_pred,
+        frame=target_lf,
+        view=app.player.view,
+        external_preview=True,
+    )
+
+    user_count_before = sum(
+        1 for inst in target_lf.instances if not isinstance(inst, PredictedInstance)
+    )
+
+    app._handle_instance_double_click(preview_pred, None)
+
+    adopted_prediction = [
+        inst for inst in target_lf.instances if isinstance(inst, PredictedInstance)
+    ][-1]
+    user_instances = [
+        inst for inst in target_lf.instances if not isinstance(inst, PredictedInstance)
+    ]
+    assert adopted_prediction is not preview_pred
+    assert adopted_prediction.skeleton is app.labels.skeleton
+    assert len(user_instances) == user_count_before + 1
+    assert user_instances[-1].from_predicted is adopted_prediction
+    assert user_instances[-1].skeleton is app.labels.skeleton

@@ -186,3 +186,6 @@ SLEAP is released under a [BSD 3-Clause Clear License](LICENSE).
 * [Notebooks](https://docs.sleap.ai/latest/notebooks/notebooks-overview/)
 * [Developer API](https://docs.sleap.ai/latest/api)
 * [Help](https://docs.sleap.ai/latest/help)
+
+## Activate virtual environment
+.venv\Scripts\activate.bat

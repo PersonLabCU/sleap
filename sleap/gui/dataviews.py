@@ -358,7 +358,11 @@ class GenericTableView(QtWidgets.QTableView):
         if not item:
             return
 
-        idx = self.model().original_items.index(item)
+        try:
+            idx = self.model().original_items.index(item)
+        except ValueError:
+            return
+
         table_row_idx = self.model().createIndex(idx, 0)
         self.setCurrentIndex(table_row_idx)
 
@@ -390,6 +394,7 @@ class GenericTableView(QtWidgets.QTableView):
 class VideosTableModel(GenericTableModel):
     properties = (
         "name",
+        "session",
         "filepath",
         "frames",
         "height",
@@ -397,13 +402,24 @@ class VideosTableModel(GenericTableModel):
         "channels",
     )
 
+    def _get_session_name(self, video: Video) -> str:
+        if self.context is None:
+            return ""
+        for session in getattr(self.context.labels, "sessions", []):
+            if video in session.videos:
+                return session.metadata.get("session_name", "")
+        return ""
+
     def item_to_data(self, obj, item: "VideoBackend"):
+        video = item if isinstance(item, Video) else None
         data = {}
         if isinstance(item, Video):
             item = item.backend
 
         for property in self.properties:
-            if property == "name":
+            if property == "session":
+                data[property] = self._get_session_name(video) if video else ""
+            elif property == "name":
                 data[property] = (
                     Path(item.filename).name
                     if isinstance(item.filename, str)

@@ -87,12 +87,25 @@ if (
         env["_SLEAP_LD_FIXED"] = "1"
         os.execve(sys.executable, [sys.executable] + sys.argv, env)
 
+# Prevent JAX from attempting to load the TPU backend on Windows.
+# JAX's XLA bridge probes every registered backend at import time; the TPU
+# plugin can trigger a C-level crash (access violation / DLL load failure)
+# on Windows even though the error is nominally caught and logged.
+# Setting JAX_PLATFORMS=cpu skips the TPU probe entirely.  sleap-nn uses
+# PyTorch (not JAX) for GPU training/inference, so this has no effect on
+# model performance.  Users who need JAX-GPU explicitly can still override
+# by setting JAX_PLATFORMS in their environment before launching SLEAP.
+if sys.platform == "win32":
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
 import re
+import traceback
 from logging import getLogger
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 import subprocess
 
+import numpy as np
 from qtpy import QtCore, QtGui
 from qtpy.QtCore import QEvent, Qt
 from qtpy.QtWidgets import QApplication, QMainWindow, QMessageBox
@@ -102,13 +115,19 @@ from sleap.gui.color import ColorManager
 from sleap.gui.commands import CommandContext, UpdateTopic
 from sleap.gui.dialogs.metrics import MetricsTableDialog
 from sleap.gui.dialogs.shortcuts import ShortcutDialog
+from sleap.gui.session_events import event_color_map, get_video_session_events
 from sleap.gui.overlays.instance import InstanceOverlay
 from sleap.gui.overlays.tracks import TrackListOverlay, TrackTrailOverlay
 from sleap.gui.shortcuts import Shortcuts
 from sleap.gui.state import GuiState
 from sleap.gui.web import ping_analytics
+from sleap.gui.widgets.analysis_dock import AnalysisDock
+from sleap.gui.widgets.batch_analysis_dock import BatchAnalysisDock
+from sleap.gui.widgets.calibration_dock import CalibrationDock
 from sleap.gui.widgets.docks import (
     InstancesDock,
+    ReachesDock,
+    SessionsDock,
     SkeletonDock,
     SuggestionsDock,
     VideosDock,
@@ -116,7 +135,7 @@ from sleap.gui.widgets.docks import (
 from sleap.gui.widgets.slider import set_slider_marks_from_labels
 from sleap.gui.widgets.video import QtVideoPlayer
 from sleap.info.summary import StatisticSeries
-from sleap_io.model.instance import Instance
+from sleap_io.model.instance import Instance, PredictedInstance
 from sleap_io import Labels, Video
 from sleap.sleap_io_adaptors.video_utils import available_video_exts
 from sleap.prefs import prefs
@@ -131,6 +150,45 @@ from sleap.sleap_io_adaptors.lf_labels_utils import (
 
 
 logger = getLogger(__name__)
+
+
+def _install_exception_hook():
+    """Install a global exception hook that shows a dialog instead of crashing silently.
+
+    Unhandled Python exceptions inside Qt callbacks/slots normally terminate the
+    process without any visible feedback.  This hook intercepts them, logs the
+    full traceback, and shows a QMessageBox so the user knows something went
+    wrong and can save their work before the process exits.
+    """
+
+    def _handle_exception(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+
+        tb_str = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        logger.error("Uncaught exception:\n%s", tb_str)
+
+        try:
+            app = QApplication.instance()
+            if app is not None:
+                msg = QMessageBox()
+                msg.setIcon(QMessageBox.Critical)
+                msg.setWindowTitle("Unexpected Error")
+                msg.setText(
+                    "An unexpected error occurred and SLEAP may be in an unstable "
+                    "state.\n\nPlease save your work immediately."
+                )
+                msg.setDetailedText(tb_str)
+                msg.setStandardButtons(QMessageBox.Ok)
+                msg.exec_()
+        except Exception:
+            pass
+
+    sys.excepthook = _handle_exception
+
+
+_install_exception_hook()
 
 
 class MainWindow(QMainWindow):
@@ -342,9 +400,12 @@ class MainWindow(QMainWindow):
             self.commands.showImportVideos(filenames=filenames)
 
         else:
-            raise TypeError(
-                f"Invalid file type(s) dropped: {', '.join(exts)} \n"
-                f"Supported formats: .slp, .{', .'.join(available_video_exts())}"
+            supported = f".slp, .{', .'.join(available_video_exts())}"
+            QMessageBox.warning(
+                self,
+                "Unsupported File Type",
+                f"Cannot open file(s) with extension(s): {', '.join(exts)}\n\n"
+                f"Supported formats: {supported}",
             )
 
     @property
@@ -381,6 +442,9 @@ class MainWindow(QMainWindow):
         self.player.updatedPlot.connect(self._after_plot_update)
 
         self.player.view.instanceDoubleClicked.connect(
+            self._handle_instance_double_click
+        )
+        self.player.secondary_view.instanceDoubleClicked.connect(
             self._handle_instance_double_click
         )
         self.player.seekbar.selectionChanged.connect(lambda: self.updateStatusMessage())
@@ -514,7 +578,9 @@ class MainWindow(QMainWindow):
         )
 
         fileMenu.addSeparator()
-        add_menu_item(fileMenu, "add videos", "Add Videos...", self.commands.addVideo)
+        add_menu_item(
+            fileMenu, "add videos", "Add Session...", self.commands.addSession
+        )
         add_menu_item(
             fileMenu, "replace videos", "Replace Videos...", self.commands.replaceVideo
         )
@@ -1109,6 +1175,23 @@ class MainWindow(QMainWindow):
         self.skeleton_dock = SkeletonDock(self, tab_with=self.videos_dock)
         self.suggestions_dock = SuggestionsDock(self, tab_with=self.videos_dock)
         self.instances_dock = InstancesDock(self, tab_with=self.videos_dock)
+        self.sessions_dock = SessionsDock(self, tab_with=self.videos_dock)
+        self.reaches_dock = ReachesDock(self, tab_with=self.videos_dock)
+        self.analysis_dock = AnalysisDock(self, tab_with=self.videos_dock)
+        self.batch_analysis_dock = BatchAnalysisDock(self, tab_with=self.videos_dock)
+        self.calibration_dock = CalibrationDock(self, tab_with=self.videos_dock)
+        self.reaches_dock.on_reaches_changed = (
+            self.player.zoomed_timeline.set_reaches
+        )
+        # Clear reaches when the video changes
+        self.state.connect(
+            "video",
+            lambda _: (
+                self.reaches_dock._delete_all()
+                if hasattr(self, "reaches_dock")
+                else None
+            ),
+        )
 
         # Create QC dock (hidden by default, shown when user clicks menu item)
         self._create_qc_dock()
@@ -1209,8 +1292,11 @@ class MainWindow(QMainWindow):
         has_unsaved_changes = bool(self.state["has_changes"])
         has_videos = self.labels is not None and len(self.labels.videos) > 0
         has_multiple_videos = self.labels is not None and len(self.labels.videos) > 1
-        has_labeled_frames = self.labels is not None and any(
-            (lf.video == self.state["video"] for lf in self.labels)
+        current_video = self.state["video"]
+        has_labeled_frames = (
+            self.labels is not None
+            and current_video is not None
+            and bool(self.labels.find(current_video))
         )
         has_suggestions = self.labels is not None and bool(self.labels.suggestions)
         has_tracks = self.labels is not None and (len(self.labels.tracks) > 0)
@@ -1309,6 +1395,10 @@ class MainWindow(QMainWindow):
 
         if _has_topic([UpdateTopic.video]):
             self.videos_dock.table.model().items = [x for x in self.labels.videos]
+            self._update_seekbar_marks()
+            self.sessions_dock.refresh()
+            if hasattr(self, "analysis_dock"):
+                self.analysis_dock._refresh_videos()
 
         if _has_topic([UpdateTopic.skeleton]):
             self.skeleton_dock.nodes_table.model().items = self.state["skeleton"]
@@ -1367,11 +1457,21 @@ class MainWindow(QMainWindow):
 
     def _after_plot_update(self, frame_idx):
         """Run after plot is updated, but stay on same frame."""
-        overlay: TrackTrailOverlay = self.overlays["trails"]
-        overlay.redraw(self.state["video"], frame_idx)
+        try:
+            overlay: TrackTrailOverlay = self.overlays["trails"]
+            overlay.redraw(self.state["video"], frame_idx)
+        except Exception:
+            logger.exception("Error in _after_plot_update (frame_idx=%s)", frame_idx)
 
     def _after_plot_change(self, player, frame_idx, selected_inst):
         """Called each time a new frame is drawn."""
+        try:
+            self._after_plot_change_inner(player, frame_idx, selected_inst)
+        except Exception:
+            logger.exception("Error in _after_plot_change (frame_idx=%s)", frame_idx)
+
+    def _after_plot_change_inner(self, player, frame_idx, selected_inst):
+        """Inner implementation of _after_plot_change, wrapped for error safety."""
 
         # Store the current frame_idx and LabeledFrame (or make new, empty object)
         # self.state["frame_idx"] = frame_idx
@@ -1383,7 +1483,21 @@ class MainWindow(QMainWindow):
 
         # Show instances, etc, for this frame
         for overlay in self.overlays.values():
-            overlay.redraw(self.state["video"], frame_idx)
+            try:
+                overlay.redraw(self.state["video"], frame_idx)
+            except Exception:
+                logger.exception(
+                    "Error in overlay %s redraw (frame_idx=%s)",
+                    type(overlay).__name__,
+                    frame_idx,
+                )
+
+        player.add_external_prediction_preview(
+            self.state["video"],
+            frame_idx,
+            player.view,
+            self.state["labeled_frame"],
+        )
 
         # Select instance if there was already selection
         if selected_inst is not None:
@@ -1414,6 +1528,7 @@ class MainWindow(QMainWindow):
         if message is None:
             message = ""
             if len(self.labels.videos) > 0 and current_video is not None:
+                index = None
                 for i, video in enumerate(self.labels.videos):
                     if video.filename == current_video.filename:
                         same_dataset = (
@@ -1425,9 +1540,10 @@ class MainWindow(QMainWindow):
                         if same_dataset:
                             index = i
                             break
-                message += f"Video {index + 1}/"
-                message += f"{len(self.labels.videos)}"
-                message += spacer
+                if index is not None:
+                    message += f"Video {index + 1}/"
+                    message += f"{len(self.labels.videos)}"
+                    message += spacer
 
             if current_video is not None:
                 message += f"Frame: {frame_idx + 1:,}/{len(current_video):,}"
@@ -1532,10 +1648,26 @@ class MainWindow(QMainWindow):
         )
 
     def _update_seekbar_marks(self):
-        """Updates marks on seekbar."""
+        """Updates marks on seekbar and zoomed timeline."""
         set_slider_marks_from_labels(
             self.player.seekbar, self.labels, self.state["video"], self.color_manager
         )
+        # Mirror frame-state marks to the zoomed timeline
+        self.player.zoomed_timeline.set_marks(self.player.seekbar.getMarks())
+
+        events = get_video_session_events(self.labels, self.state["video"])
+        colors = event_color_map(events)
+        event_dicts = [
+            {
+                "event": event["event"],
+                "frame": event["frame"],
+                "color": colors[event["event"]],
+            }
+            for event in events
+        ]
+        # Events are shown in the zoomed timeline only; seekbar shows frame marks only
+        self.player.seekbar.setEventMarks([])
+        self.player.zoomed_timeline.set_events(event_dicts)
 
     def _set_seekbar_header(self, graph_name: str):
         """Updates graph shown in seekbar header based on menu selection."""
@@ -1593,9 +1725,20 @@ class MainWindow(QMainWindow):
             return list(set(frame_idxs) - video_user_labeled_frame_idxs)
 
         current_video = self.state["video"]
+        current_session_videos = [current_video]
+        for session in getattr(self.labels, "sessions", []) or []:
+            session_videos = list(getattr(session, "videos", []) or [])
+            if current_video in session_videos:
+                current_session_videos = session_videos
+                break
 
         selection = dict()
-        selection["frame"] = {current_video: [self.state["frame_idx"]]}
+        frame_idx = self.state["frame_idx"]
+        selection["frame"] = {
+            video: [frame_idx]
+            for video in current_session_videos
+            if frame_idx is not None and frame_idx < len(video)
+        }
 
         # Use negative number in list for range (i.e., "0,-123" means "0-123")
         # The ranges should be [X, Y) like standard Python ranges
@@ -1604,8 +1747,14 @@ class MainWindow(QMainWindow):
 
         clip_range = self.state.get("frame_range", default=(0, 0))
 
-        selection["clip"] = {current_video: encode_range(*clip_range)}
-        selection["video"] = {current_video: encode_range(0, len(current_video))}
+        selection["clip"] = {
+            video: encode_range(clip_range[0], min(clip_range[1], len(video)))
+            for video in current_session_videos
+            if clip_range[0] < min(clip_range[1], len(video))
+        }
+        selection["video"] = {
+            video: encode_range(0, len(video)) for video in current_session_videos
+        }
         selection["all_videos"] = {
             video: encode_range(0, len(video)) for video in self.labels.videos
         }
@@ -1623,7 +1772,9 @@ class MainWindow(QMainWindow):
         }
 
         # Always provide random_video option (current video sampling)
-        selection["random_video"] = {current_video: list(range(current_video.shape[0]))}
+        selection["random_video"] = {
+            video: list(range(video.shape[0])) for video in current_session_videos
+        }
 
         if user_labeled_frames:
             selection["user"] = {
@@ -1794,13 +1945,127 @@ class MainWindow(QMainWindow):
             if event is not None and event.modifiers() & Qt.ShiftModifier:
                 mark_complete = True
 
+            target_lf = self._find_labeled_frame_for_instance(instance)
+            target_params = {}
+            qt_instance = None
+            if target_lf is not None:
+                target_params = {
+                    "target_video": target_lf.video,
+                    "target_frame_idx": target_lf.frame_idx,
+                }
+            else:
+                qt_instance = self._find_qt_instance_for_instance(instance)
+                if qt_instance is not None:
+                    target_video = getattr(qt_instance, "video", None)
+                    target_frame_idx = getattr(qt_instance, "frame_idx", None)
+                    if target_video is not None:
+                        target_params["target_video"] = target_video
+                    if target_frame_idx is not None:
+                        target_params["target_frame_idx"] = target_frame_idx
+                    if target_video is not None and target_frame_idx is not None:
+                        target_lf = self.labels.find(
+                            target_video, target_frame_idx, return_new=True
+                        )[0]
+
+            if (
+                target_lf is not None
+                and qt_instance is not None
+                and getattr(qt_instance, "external_preview", False)
+                and not any(inst is instance for inst in target_lf.instances)
+            ):
+                instance = self._canonicalize_preview_prediction(instance)
+                qt_instance.instance = instance
+                if target_lf not in self.labels:
+                    self.labels.append(target_lf)
+                target_lf.instances.append(instance)
+
             self.commands.newInstance(
-                copy_instance=instance, mark_complete=mark_complete
+                copy_instance=instance,
+                mark_complete=mark_complete,
+                **target_params,
             )
 
         # When a regular instance is double-clicked, add any missing points
         else:
             self.commands.completeInstanceNodes(instance)
+
+    def _find_labeled_frame_for_instance(self, instance: Instance):
+        """Return the labeled frame that owns an instance object."""
+        current_lf = self.state["labeled_frame"]
+        if current_lf is not None and any(
+            inst is instance for inst in current_lf.instances
+        ):
+            return current_lf
+
+        for lf in self.labels.labeled_frames:
+            if any(inst is instance for inst in lf.instances):
+                return lf
+
+        return None
+
+    def _canonicalize_preview_prediction(
+        self, instance: PredictedInstance
+    ) -> PredictedInstance:
+        """Return a preview prediction using a project-owned skeleton."""
+        if any(instance.skeleton is skel for skel in self.labels.skeletons):
+            return instance
+
+        skeleton = self._matching_project_skeleton(instance.skeleton)
+        points = np.full((len(skeleton.nodes), 2), np.nan, dtype=np.float64)
+        point_scores = np.full(len(skeleton.nodes), np.nan, dtype=np.float64)
+        source_names = list(instance.skeleton.node_names)
+
+        for i, node_name in enumerate(skeleton.node_names):
+            if node_name not in source_names:
+                continue
+            source_idx = source_names.index(node_name)
+            pred_point = instance.points[source_idx]
+            points[i] = pred_point["xy"]
+            if "score" in instance.points.dtype.names:
+                point_scores[i] = pred_point["score"]
+
+        canonical = PredictedInstance.from_numpy(
+            points,
+            skeleton=skeleton,
+            point_scores=point_scores,
+            score=getattr(instance, "score", 0.0),
+            track=getattr(instance, "track", None),
+            tracking_score=getattr(instance, "tracking_score", None),
+        )
+
+        for i, node_name in enumerate(skeleton.node_names):
+            if node_name in source_names:
+                source_idx = source_names.index(node_name)
+                canonical.points[i]["visible"] = instance.points[source_idx]["visible"]
+
+        return canonical
+
+    def _matching_project_skeleton(self, source_skeleton: Skeleton) -> Skeleton:
+        """Find the project skeleton matching an external prediction skeleton."""
+        source_names = list(source_skeleton.node_names)
+        for skeleton in self.labels.skeletons:
+            if list(skeleton.node_names) == source_names:
+                return skeleton
+
+        source_name_set = set(source_names)
+        for skeleton in self.labels.skeletons:
+            if set(skeleton.node_names) == source_name_set:
+                return skeleton
+
+        return self.state["skeleton"]
+
+    def _find_qt_instance_for_instance(self, instance: Instance):
+        """Return the displayed QtInstance wrapper for an instance object."""
+        player = getattr(self, "player", None)
+        if player is None:
+            return None
+
+        for view in player._iter_views():
+            for qt_instance in view.all_instances:
+                if qt_instance.instance is instance:
+                    return qt_instance
+
+        return None
 
     def _show_keyboard_shortcuts_window(self):
         """Shows gui for viewing/modifying keyboard shortucts."""

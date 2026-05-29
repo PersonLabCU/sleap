@@ -1,3 +1,8 @@
+from types import SimpleNamespace
+
+import sleap_io as sio
+
+from sleap.gui.state import GuiState
 from sleap.gui.widgets.video import (
     GraphicsView,
     QtVideoPlayer,
@@ -5,10 +10,82 @@ from sleap.gui.widgets.video import (
     VisibleBoundingBox,
     QtInstance,
 )
+from sleap.sleap_io_adaptors.lf_labels_utils import labels_add_video
 
 from qtpy import QtCore, QtWidgets
-from qtpy.QtGui import QColor, QWheelEvent
+from qtpy.QtGui import QColor, QMouseEvent, QWheelEvent
 import numpy as np
+
+
+class FakeGraphicsMouseEvent:
+    def __init__(self, pos, modifiers=QtCore.Qt.NoModifier):
+        self._pos = pos
+        self._modifiers = modifiers
+        self.accepted = False
+
+    def button(self):
+        return QtCore.Qt.LeftButton
+
+    def buttons(self):
+        return QtCore.Qt.LeftButton
+
+    def modifiers(self):
+        return self._modifiers
+
+    def pos(self):
+        return self._pos
+
+    def accept(self):
+        self.accepted = True
+
+
+def _qt_instance_node_positions(qt_instance):
+    return {
+        name: (node.scenePos().x(), node.scenePos().y())
+        for name, node in qt_instance.nodes.items()
+    }
+
+
+def test_context_menu_add_instance_actions_ignore_checked_arg():
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    calls = []
+
+    class Context:
+        labels = None
+
+        def newInstance(self, **kwargs):
+            calls.append(kwargs)
+
+    vp = QtVideoPlayer(context=Context())
+    try:
+        scene_pos = QtCore.QPointF(12, 34)
+        vp.create_contextual_menu(scene_pos, target_frame_idx=7)
+
+        for action_name in (
+            "Default",
+            "Average",
+            "Force Directed",
+            "Copy Prior Frame",
+            "Random",
+        ):
+            vp._menu_actions[action_name].trigger()
+
+        assert [call["init_method"] for call in calls] == [
+            "best",
+            "template",
+            "force_directed",
+            "prior_frame",
+            "random",
+        ]
+        assert calls[0]["location"] == scene_pos
+        assert calls[1]["location"] == scene_pos
+        assert calls[2]["location"] == scene_pos
+        assert "location" not in calls[3]
+        assert calls[4]["location"] == scene_pos
+        assert all(call["target_frame_idx"] == 7 for call in calls)
+    finally:
+        vp.cleanup()
 
 
 def test_gui_video(qtbot):
@@ -17,6 +94,83 @@ def test_gui_video(qtbot):
     qtbot.addWidget(vp)
 
     assert vp.close()
+
+
+def test_inner_bounding_box_drag_requires_shift(qtbot, centered_pair_labels):
+    vp = QtVideoPlayer(centered_pair_labels.video)
+    qtbot.addWidget(vp)
+
+    labeled_frame = centered_pair_labels.labeled_frames[0]
+    views = (vp.view, vp.secondary_view)
+
+    try:
+        for view in views:
+            vp.addInstance(
+                instance=labeled_frame.instances[0],
+                frame=labeled_frame,
+                view=view,
+            )
+            qt_instance = view.all_instances[-1]
+            box = qt_instance.box
+            start = box.rect().center()
+            end = start + QtCore.QPointF(15, 7)
+            before = _qt_instance_node_positions(qt_instance)
+
+            box.mousePressEvent(FakeGraphicsMouseEvent(start))
+            box.mouseMoveEvent(FakeGraphicsMouseEvent(end))
+
+            assert not box.moving
+            assert _qt_instance_node_positions(qt_instance) == before
+    finally:
+        vp.cleanup()
+
+
+def test_shift_inner_bounding_box_drag_moves_instance(qtbot, centered_pair_labels):
+    vp = QtVideoPlayer(centered_pair_labels.video)
+    qtbot.addWidget(vp)
+
+    labeled_frame = centered_pair_labels.labeled_frames[0]
+    views = (vp.view, vp.secondary_view)
+
+    try:
+        for view in views:
+            vp.addInstance(
+                instance=labeled_frame.instances[0],
+                frame=labeled_frame,
+                view=view,
+            )
+            qt_instance = view.all_instances[-1]
+            box = qt_instance.box
+            start = box.rect().center()
+            delta = QtCore.QPointF(15, 7)
+            before = _qt_instance_node_positions(qt_instance)
+
+            box.mousePressEvent(
+                FakeGraphicsMouseEvent(start, modifiers=QtCore.Qt.ShiftModifier)
+            )
+            box.mouseMoveEvent(
+                FakeGraphicsMouseEvent(
+                    start + delta, modifiers=QtCore.Qt.ShiftModifier
+                )
+            )
+
+            assert box.moving
+            for name, (x, y) in _qt_instance_node_positions(qt_instance).items():
+                assert (x, y) == (
+                    before[name][0] + delta.x(),
+                    before[name][1] + delta.y(),
+                )
+    finally:
+        vp.cleanup()
+
+
+def test_video_player_leave_event(qtbot):
+    """QtVideoPlayer leave events should not assume GraphicsView attributes."""
+    vp = QtVideoPlayer()
+    qtbot.addWidget(vp)
+
+    event = QtCore.QEvent(QtCore.QEvent.Type.Leave)
+    vp.leaveEvent(event)
 
 
 def test_gui_video_instances(qtbot, small_robot_mp4_vid, centered_pair_labels):
@@ -83,6 +237,61 @@ def test_gui_video_instances(qtbot, small_robot_mp4_vid, centered_pair_labels):
     assert vp.close()
 
 
+def test_session_views_cycle_and_clamp(
+    qtbot,
+    centered_pair_labels,
+    small_robot_mp4_vid,
+    small_robot_3_frame_vid,
+):
+    """Test linked side-by-side session views and view cycling."""
+    labels = centered_pair_labels
+    primary_video = labels.video
+    labels_add_video(labels, small_robot_mp4_vid)
+    labels_add_video(labels, small_robot_3_frame_vid)
+
+    cameras = [
+        sio.Camera(name="front"),
+        sio.Camera(name="side"),
+        sio.Camera(name="top"),
+    ]
+    session = sio.RecordingSession(camera_group=sio.CameraGroup(cameras=cameras))
+    for video, camera in zip(
+        [primary_video, small_robot_mp4_vid, small_robot_3_frame_vid], cameras
+    ):
+        session.add_video(video, camera)
+    labels.sessions.append(session)
+
+    state = GuiState()
+    state["frame_idx"] = 10
+    vp = QtVideoPlayer(state=state, context=SimpleNamespace(labels=labels))
+    qtbot.addWidget(vp)
+    state["video"] = primary_video
+
+    assert not vp.secondary_view_widget.isHidden()
+    assert vp.primary_title.text() == "front"
+    assert vp.secondary_title.text() == "side"
+    assert vp._clamped_frame_idx(small_robot_3_frame_vid) == 2
+
+    vp.set_hovered_session_view(vp.secondary_view)
+    assert vp.cycle_hovered_session_view()
+    assert vp.secondary_video is small_robot_3_frame_vid
+    assert vp.secondary_title.text() == "top"
+
+    vp.set_hovered_session_view(vp.view)
+    assert vp.cycle_hovered_session_view()
+    assert state["video"] is primary_video
+    assert vp.video is primary_video
+    assert vp.primary_title.text() == "front"
+    assert vp.secondary_video is small_robot_mp4_vid
+    assert vp.secondary_title.text() == "side"
+
+    state["video"] = small_robot_3_frame_vid
+    assert state["video"] is primary_video
+    assert vp.video is primary_video
+    assert vp.secondary_video is small_robot_3_frame_vid
+    assert vp.secondary_title.text() == "top"
+
+
 def test_getInstancesBoundingRect():
     rect = GraphicsView.getInstancesBoundingRect([])
     assert rect.isNull()
@@ -138,6 +347,101 @@ def test_VisibleBoundingBox(qtbot, centered_pair_labels):
     # Check if bounding box scaled appropriately
     assert inst.box.rect().width() - initial_width == 2 * dx
     assert inst.box.rect().height() - initial_height == 2 * dy
+
+
+def test_prediction_box_double_click_emits_instance_signal(centered_pair_labels):
+    """Double-clicking a prediction box should convert the prediction."""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    vp = QtVideoPlayer(centered_pair_labels.video)
+    try:
+        source_inst = centered_pair_labels.labeled_frames[0].instances[0]
+        pred_inst = sio.PredictedInstance.from_numpy(
+            source_inst.numpy(),
+            skeleton=source_inst.skeleton,
+            score=0.9,
+        )
+        vp.addInstance(pred_inst)
+        qt_inst = vp.view.predicted_instances[0]
+
+        box_rect = qt_inst.box.rect()
+        scene_pos = qt_inst.box.mapToScene(
+            QtCore.QPointF(box_rect.left() + 5, box_rect.center().y())
+        )
+        assert not qt_inst.boundingRect().contains(qt_inst.mapFromScene(scene_pos))
+        assert not vp.view._is_frame_background_double_click(scene_pos)
+
+        received = []
+        vp.view.instanceDoubleClicked.connect(
+            lambda inst, event: received.append((inst, event.modifiers()))
+        )
+
+        viewport_pos = vp.view.mapFromScene(scene_pos)
+        event = QMouseEvent(
+            QtCore.QEvent.Type.MouseButtonDblClick,
+            QtCore.QPointF(viewport_pos),
+            QtCore.QPointF(viewport_pos),
+            QtCore.QPointF(viewport_pos),
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.MouseButton.LeftButton,
+            QtCore.Qt.KeyboardModifier.ShiftModifier,
+        )
+        assert vp.view._instance_item_at(vp.view.mapToScene(event.pos())) is qt_inst
+        vp.view.mouseDoubleClickEvent(event)
+
+        assert received == [(pred_inst, QtCore.Qt.KeyboardModifier.ShiftModifier)]
+        assert event.isAccepted()
+    finally:
+        vp.cleanup()
+
+
+def test_external_prediction_preview_skips_frames_with_project_predictions(
+    centered_pair_labels,
+):
+    """External previews should not draw over project predictions, hidden or visible."""
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    vp = QtVideoPlayer(
+        centered_pair_labels.video,
+        context=SimpleNamespace(labels=centered_pair_labels),
+    )
+    try:
+        lf = centered_pair_labels.find(
+            centered_pair_labels.video, 0, return_new=True
+        )[0]
+        pred_inst = sio.PredictedInstance.from_numpy(
+            centered_pair_labels[0].instances[0].numpy(),
+            skeleton=centered_pair_labels.skeleton,
+            score=0.9,
+        )
+        user_inst = sio.Instance.from_numpy(
+            pred_inst.numpy(),
+            skeleton=centered_pair_labels.skeleton,
+        )
+        user_inst.from_predicted = pred_inst
+        lf.instances.extend([pred_inst, user_inst])
+
+        class Manager:
+            def instances_for(self, video, frame_idx):
+                return [
+                    sio.PredictedInstance.from_numpy(
+                        pred_inst.numpy(),
+                        skeleton=centered_pair_labels.skeleton,
+                        score=0.8,
+                    )
+                ]
+
+        vp.state["external predictions"] = Manager()
+        vp.add_external_prediction_preview(
+            centered_pair_labels.video,
+            0,
+            vp.view,
+            lf,
+        )
+
+        assert not any(inst.external_preview for inst in vp.view.all_instances)
+    finally:
+        vp.cleanup()
 
 
 def test_wheelEvent(qtbot):

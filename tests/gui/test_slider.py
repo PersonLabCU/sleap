@@ -1,4 +1,9 @@
-from sleap.gui.widgets.slider import VideoSlider, set_slider_marks_from_labels
+from sleap.gui.widgets.slider import (
+    VideoSlider,
+    _find_labeled_frame_for_tooltip,
+    set_slider_marks_from_labels,
+)
+from sleap_io import LabeledFrame, Labels, Video
 import pytest
 
 
@@ -39,6 +44,17 @@ def test_slider(qtbot, centered_pair_predictions):
 
     slider.setEnabled(True)
     assert slider.enabled()
+
+
+def test_find_labeled_frame_for_tooltip_uses_last_duplicate():
+    video = Video(filename="test.mp4")
+    first = LabeledFrame(video=video, frame_idx=10, instances=[])
+    last = LabeledFrame(video=video, frame_idx=10, instances=[])
+    labels = Labels(labeled_frames=[first, last])
+    labels._frame_index = None
+
+    assert _find_labeled_frame_for_tooltip(labels, video, 10) is last
+    assert labels._frame_index is None
 
 
 @pytest.mark.parametrize(

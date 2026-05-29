@@ -3,6 +3,7 @@
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import attr
+import numpy as np
 from qtpy import QtCore, QtGui
 
 from sleap.gui.overlays.base import BaseOverlay
@@ -89,16 +90,15 @@ class TrackTrailOverlay(BaseOverlay):
                     if inst.track not in all_track_trails:
                         all_track_trails[inst.track] = [[] for _ in range(len(nodes))]
 
+                    point_index = {
+                        name: idx for idx, name in enumerate(inst.points["name"])
+                    }
                     # loop through all nodes
                     for node_i, node in enumerate(nodes):
-                        if (
-                            node.name in inst.points["name"]
-                            and inst.points["visible"][node_i]
-                        ):
-                            point = (
-                                inst.points["xy"][node_i][0],
-                                inst.points["xy"][node_i][1],
-                            )
+                        point_idx = point_index.get(node.name)
+                        if point_idx is not None and inst.points["visible"][point_idx]:
+                            xy = inst.points["xy"][point_idx]
+                            point = (xy[0], xy[1]) if np.all(np.isfinite(xy)) else None
 
                         # Add last location of node so that we can easily
                         # calculate trail length (since we adjust opacity).
@@ -207,6 +207,9 @@ class TrackTrailOverlay(BaseOverlay):
     @staticmethod
     def map_to_qt_path(point_list):
         """Converts a list of (x, y)-tuples to a `QPainterPath`."""
+        point_list = [
+            point for point in point_list if np.all(np.isfinite(point))
+        ]
         if not point_list:
             return QtGui.QPainterPath()
 
@@ -255,16 +258,23 @@ class TrackListOverlay(BaseOverlay):
         """Gets or set whether overlay is visible."""
         if self.text_box is None:
             return False
-        return self.text_box.isVisible()
+        try:
+            return self.text_box.isVisible()
+        except RuntimeError:
+            self.text_box = None
+            return False
 
     @visible.setter
     def visible(self, val):
         if self.text_box is None:
             return
-        if val:
-            pos = self.player.view.mapToScene(10, 10)
-            if pos.x() > 0:
-                self.text_box.setPos(pos)
-            else:
-                self.text_box.setPos(10, 10)
-        self.text_box.setVisible(val)
+        try:
+            if val:
+                pos = self.player.view.mapToScene(10, 10)
+                if pos.x() > 0:
+                    self.text_box.setPos(pos)
+                else:
+                    self.text_box.setPos(10, 10)
+            self.text_box.setVisible(val)
+        except RuntimeError:
+            self.text_box = None

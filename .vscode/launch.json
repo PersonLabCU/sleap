@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "SLEAP GUI (.venv)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "sleap.cli",
+      "args": ["label"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "UV_CACHE_DIR": "${workspaceFolder}\\.uv-cache",
+        "UV_PYTHON_INSTALL_DIR": "${workspaceFolder}\\.uv-python",
+        "UV_PROJECT_ENVIRONMENT": "${workspaceFolder}\\.venv",
+        "SLEAP_CONFIG_DIR": "${workspaceFolder}\\.sleap",
+        "VIRTUAL_ENV": "${workspaceFolder}\\.venv",
+        "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+      }
+    },
+    {
+      "name": "SLEAP Doctor (.venv)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "sleap.cli",
+      "args": ["doctor"],
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "justMyCode": false,
+      "env": {
+        "UV_CACHE_DIR": "${workspaceFolder}\\.uv-cache",
+        "UV_PYTHON_INSTALL_DIR": "${workspaceFolder}\\.uv-python",
+        "UV_PROJECT_ENVIRONMENT": "${workspaceFolder}\\.venv",
+        "SLEAP_CONFIG_DIR": "${workspaceFolder}\\.sleap",
+        "VIRTUAL_ENV": "${workspaceFolder}\\.venv",
+        "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+      }
+    }
+  ]
+}

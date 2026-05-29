@@ -39,6 +39,10 @@ def get_stable_node_pairs(
     all_points_arrays: np.ndarray, node_names, min_dist: float = 0.0
 ):
     """Returns sorted list of node pairs with mean and standard dev distance."""
+    import warnings
+
+    if len(all_points_arrays) == 0:
+        return []
 
     # Calculate distance from each point to each other point within each instance
     intra_points = (
@@ -46,9 +50,12 @@ def get_stable_node_pairs(
     )
     intra_dist = np.linalg.norm(intra_points, axis=-1)
 
-    # Find mean and standard deviation for distances between each pair of nodes
-    inter_std = np.nanstd(intra_dist, axis=0)
-    inter_mean = np.nanmean(intra_dist, axis=0)
+    # Find mean and standard deviation for distances between each pair of nodes.
+    # Suppress warnings for all-NaN slices (nodes never labeled across all instances).
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        inter_std = np.nanstd(intra_dist, axis=0)
+        inter_mean = np.nanmean(intra_dist, axis=0)
 
     # Clear pairs with too small mean distance
     inter_std[inter_mean <= min_dist] = np.nan
@@ -75,9 +82,11 @@ def get_stable_node_pairs(
     results = []
     for inds, flat_idx in zip(sorted_inds, sorted_flat_inds):
         node_a, node_b = inds
+        if node_a == node_b:
+            continue
         std, mean = flat_inter_std[flat_idx], flat_inter_mean[flat_idx]
-        if mean <= min_dist:
-            break
+        if np.isnan(mean) or mean <= min_dist:
+            continue
         results.append(dict(node_a=node_a, node_b=node_b, std=std, mean=mean))
     return results
 
@@ -85,8 +94,15 @@ def get_stable_node_pairs(
 def get_most_stable_node_pair(
     all_points_arrays: np.ndarray, min_dist: float = 0.0
 ) -> Tuple[int, int]:
-    """Returns pair of nodes which are at stable distance (over min threshold)."""
+    """Returns pair of nodes which are at stable distance (over min threshold).
+
+    Falls back to nodes (0, 1) when no pair exceeds *min_dist* (e.g. all
+    instances have points clustered at the origin or all-NaN coordinates).
+    """
     all_pairs = get_stable_node_pairs(all_points_arrays, min_dist)
+    if not all_pairs:
+        n_nodes = all_points_arrays.shape[1] if all_points_arrays.ndim == 3 else 2
+        return 0, min(1, n_nodes - 1)
     return all_pairs[0]["node_a"], all_pairs[0]["node_b"]
 
 
@@ -149,8 +165,12 @@ def get_mean_and_std_for_points(
     """
     Returns mean and standard deviation for every node given aligned points.
     """
-    mean = np.nanmean(aligned_points_arrays, axis=0)
-    stdev = np.nanstd(aligned_points_arrays, axis=0)
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        mean = np.nanmean(aligned_points_arrays, axis=0)
+        stdev = np.nanstd(aligned_points_arrays, axis=0)
 
     return mean, stdev
 

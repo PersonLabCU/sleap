@@ -300,7 +300,8 @@ def get_config_file(
 ) -> str:
     """Returns the full path to the specified config file.
 
-    The config file will be at ~/.sleap/<version>/<shortname>
+    The config file will be at ~/.sleap/<version>/<shortname>, or
+    $SLEAP_CONFIG_DIR/<version>/<shortname> when SLEAP_CONFIG_DIR is set.
 
     If that file doesn't yet exist, we'll look for a <shortname> file inside
     the package config directory (sleap/config) and copy the file into the
@@ -319,7 +320,8 @@ def get_config_file(
         The full path to the specified config file.
     """
 
-    desired_path = Path.home() / f".sleap/{sleap_version.__version__}/{shortname}"
+    config_root = Path(os.environ.get("SLEAP_CONFIG_DIR", Path.home() / ".sleap"))
+    desired_path = config_root.expanduser() / sleap_version.__version__ / shortname
 
     # Make sure there's a ~/.sleap/<version>/ directory to store user version of
     # the config file.

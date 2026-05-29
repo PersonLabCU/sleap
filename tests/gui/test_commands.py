@@ -1396,6 +1396,79 @@ def test_copy_prior_frame_prefers_user_instance(qtbot, centered_pair_predictions
     assert from_prev_frame is True
 
 
+def test_add_instance_uses_explicit_target_frame(centered_pair_predictions):
+    labels, prev_lf, curr_lf, _, user_inst = _build_prior_frame_labels(
+        centered_pair_predictions
+    )
+    context = CommandContext.from_labels(labels)
+    context.state["labeled_frame"] = prev_lf
+    context.state["frame_idx"] = prev_lf.frame_idx
+    context.state["video"] = labels.video
+    context.state["skeleton"] = labels.skeleton
+
+    before_prev = len(prev_lf.instances)
+    before_curr = len(curr_lf.instances)
+
+    class Player:
+        def interaction_video(self):
+            return labels.video
+
+        def interaction_frame_idx(self):
+            return curr_lf.frame_idx
+
+    context.app.player = Player()
+    context.newInstance(init_method="prior_frame")
+
+    assert len(prev_lf.instances) == before_prev
+    assert len(curr_lf.instances) == before_curr + 1
+    assert np.array_equal(curr_lf.instances[-1].numpy(), user_inst.numpy())
+
+
+def test_copy_prior_frame_without_prior_instance_is_noop(centered_pair_predictions):
+    labels = centered_pair_predictions
+    labels.labeled_frames = [LabeledFrame(video=labels.video, frame_idx=0)]
+    lf = labels.labeled_frames[0]
+    context = CommandContext.from_labels(labels)
+    context.state["labeled_frame"] = lf
+    context.state["frame_idx"] = lf.frame_idx
+    context.state["video"] = labels.video
+    context.state["skeleton"] = labels.skeleton
+
+    context.newInstance(init_method="prior_frame")
+
+    assert len(lf.instances) == 0
+
+
+def test_paste_instance_uses_explicit_target_frame(min_tracks_2node_labels: Labels):
+    labels = min_tracks_2node_labels
+    context = CommandContext.from_labels(labels)
+    source_lf = labels.labeled_frames[0]
+    target_lf = labels.labeled_frames[2]
+    source_instance = source_lf.instances[0]
+
+    context.state["clipboard_instance"] = source_instance
+    context.state["labeled_frame"] = source_lf
+    context.state["frame_idx"] = source_lf.frame_idx
+    context.state["video"] = source_lf.video
+
+    before_source = len(source_lf.instances)
+    before_target = len(target_lf.instances)
+
+    class Player:
+        def interaction_video(self):
+            return target_lf.video
+
+        def interaction_frame_idx(self):
+            return target_lf.frame_idx
+
+    context.app.player = Player()
+    context.pasteInstance()
+
+    assert len(source_lf.instances) == before_source
+    assert len(target_lf.instances) == before_target + 1
+    assert instance_same_pose_as_compat(target_lf.instances[-1], source_instance)
+
+
 def test_effective_prior_instances_drops_used_predictions(centered_pair_predictions):
     """The helper should hide each prediction whose user counterpart is in frame."""
     _, prev_lf, _, pred_inst, user_inst = _build_prior_frame_labels(

@@ -8,6 +8,7 @@ from sleap_io.model.instance import (
     Instance,
     PredictedInstance,
     PointsArray,
+    PredictedPointsArray,
 )
 
 
@@ -31,7 +32,7 @@ def node_points(instance) -> List[Tuple[Node, np.ndarray]]:
     node_points = []
 
     # Create mapping
-    for node_idx in range(len(points_data)):
+    for node_idx in range(min(len(points_data), len(skeleton_nodes))):
         node = skeleton_nodes[node_idx]
         # Find the point data for this node
         point_data = points_data[node_idx]
@@ -98,6 +99,7 @@ def fill_missing(
     # Build a new full points array aligned to the skeleton order.
     skeleton_nodes = list(instance.skeleton.nodes)
     current_names = list(instance.points["name"]) if len(instance.points) else []
+    current_index = {name: idx for idx, name in enumerate(current_names)}
     w, h = y2 - y1, x2 - x1
 
     def _rand_point():
@@ -123,20 +125,16 @@ def fill_missing(
 
     for i, node in enumerate(skeleton_nodes):
         name = node.name
-        if name in current_names:
-            # Copy existing if present and not NaN; otherwise generate new
-            existing_idx = current_names.index(name)
-            pt = instance.points[existing_idx]
-            xy = pt["xy"]
-            if not (np.isnan(xy[0]) or np.isnan(xy[1])):
-                input_array[i] = (
-                    np.array(xy, dtype=np.float64),
-                    pt["visible"],
-                    pt["complete"],
-                    name,
-                )
-            else:
-                input_array[i] = (_rand_point(), False, False, name)
+        if name in current_index:
+            # Preserve existing points exactly, including NaN/invisible nodes
+            # inserted when a skeleton node is added after labeling.
+            pt = instance.points[current_index[name]]
+            input_array[i] = (
+                np.array(pt["xy"], dtype=np.float64),
+                pt["visible"],
+                pt["complete"],
+                name,
+            )
         else:
             input_array[i] = (_rand_point(), False, False, name)
 
@@ -163,6 +161,66 @@ def fill_missing(
         )
 
     return new_instance
+
+
+def align_instance_points_to_skeleton(instance: Instance) -> Instance:
+    """Resize/reorder an instance's points to match its skeleton nodes.
+
+    Existing points are preserved by node name. Skeleton nodes that were added
+    after the instance was labeled are inserted as missing/invisible points.
+    """
+    skeleton_nodes = list(instance.skeleton.nodes)
+    current_points = instance.points
+    current_names = list(current_points["name"]) if len(current_points) else []
+    is_predicted = isinstance(instance, PredictedInstance)
+    dtype = (
+        PredictedPointsArray.empty(0).dtype
+        if is_predicted
+        else PointsArray.empty(0).dtype
+    )
+    aligned = np.empty(len(skeleton_nodes), dtype=dtype)
+    current_index = {name: idx for idx, name in enumerate(current_names)}
+
+    for i, node in enumerate(skeleton_nodes):
+        name = node.name
+        if name in current_index:
+            aligned[i] = current_points[current_index[name]]
+            aligned[i]["name"] = name
+        else:
+            aligned[i]["xy"] = np.array([np.nan, np.nan], dtype=np.float64)
+            if "score" in aligned.dtype.names:
+                aligned[i]["score"] = np.nan
+            aligned[i]["visible"] = False
+            aligned[i]["complete"] = False
+            aligned[i]["name"] = name
+
+    if is_predicted:
+        instance.points = PredictedPointsArray.from_array(aligned)
+    else:
+        instance.points = PointsArray.from_array(aligned)
+    return instance
+
+
+def align_labeled_frames_to_skeleton(labels, skeleton) -> int:
+    """Align all instances using a skeleton to the skeleton's current node list."""
+    if labels is None:
+        return 0
+
+    changed = 0
+    for lf in getattr(labels, "labeled_frames", []) or []:
+        for inst in getattr(lf, "instances", []) or []:
+            if inst.skeleton is not skeleton:
+                continue
+            expected = len(skeleton.nodes)
+            names_match = (
+                len(inst.points) == expected
+                and list(inst.points["name"]) == list(skeleton.node_names)
+            )
+            if names_match:
+                continue
+            align_instance_points_to_skeleton(inst)
+            changed += 1
+    return changed
 
 
 # Instance/PredictedInstance API Compatibility Functions

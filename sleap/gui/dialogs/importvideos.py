@@ -50,6 +50,31 @@ from typing import Any, Dict, List, Optional
 from sleap.gui.widgets.video import ndarray_to_qimage
 
 
+HDF5_VIDEO_EXTS = {f".{ext.lower()}" for ext in HDF5Video.EXTS}
+
+
+def find_h5_video_datasets(file_path: str) -> List[str]:
+    """Return importable 4D image datasets in an HDF5 file."""
+    try:
+        with h5py.File(file_path, "r") as f:
+            return _find_h5_video_datasets("", f)
+    except Exception:
+        return []
+
+
+def _find_h5_video_datasets(data_path, data_object) -> List[str]:
+    """Recursively find 4D datasets that can be opened as HDF5 videos."""
+    options = []
+    for key in data_object.keys():
+        child = data_object[key]
+        if isinstance(child, h5py._hl.dataset.Dataset):
+            if len(child.shape) == 4:
+                options.append(data_path + "/" + key)
+        elif isinstance(child, h5py._hl.group.Group):
+            options.extend(_find_h5_video_datasets(data_path + "/" + key, child))
+    return options
+
+
 class ImportVideos:
     """Class to handle video importing UI."""
 
@@ -107,6 +132,13 @@ class ImportVideos:
 
     @staticmethod
     def create_video(import_item: Dict[str, Any]) -> Video:
+        params = import_item["params"]
+        if import_item.get("video_type") == "hdf5" and not params.get("dataset"):
+            filename = params.get("filename", "")
+            raise ValueError(
+                f"HDF5 file has no selected video dataset and cannot be imported: "
+                f"{filename}"
+            )
         return Video.from_filename(**import_item["params"])
 
     def ask_and_return_videos(self) -> List[Video]:
@@ -340,6 +372,17 @@ class ImportItemWidget(QFrame):
             parent=self, file_path=self.file_path, import_type=self.import_type
         )
 
+        if (
+            self.import_type["video_type"] == "hdf5"
+            and self.options_widget.widget_elements.get("dataset") is not None
+            and self.options_widget.widget_elements["dataset"].count() == 0
+        ):
+            self.enabled_checkbox_widget.setChecked(False)
+            self.enabled_checkbox_widget.setEnabled(False)
+            self.enabled_checkbox_widget.setToolTip(
+                "Disabled: no 4D video dataset was found in this HDF5 file."
+            )
+
         self.message_widget = MessageWidget(parent=self, message=message)
 
         self.preview_widget = VideoPreviewWidget(parent=self)
@@ -553,25 +596,11 @@ class ImportParamWidget(QWidget):
         Note:
             This is used to populate the "function_menu"-type param.
         """
-        try:
-            with h5py.File(self.file_path, "r") as f:
-                options = self._find_h5_datasets("", f)
-        except Exception:
-            options = []
-        return options
+        return find_h5_video_datasets(self.file_path)
 
     def _find_h5_datasets(self, data_path, data_object) -> list:
         """Recursively find datasets in hdf5 file."""
-        options = []
-        for key in data_object.keys():
-            if isinstance(data_object[key], h5py._hl.dataset.Dataset):
-                if len(data_object[key].shape) == 4:
-                    options.append(data_path + "/" + key)
-            elif isinstance(data_object[key], h5py._hl.group.Group):
-                options.extend(
-                    self._find_h5_datasets(data_path + "/" + key, data_object[key])
-                )
-        return options
+        return _find_h5_video_datasets(data_path, data_object)
 
 
 class MessageWidget(QWidget):

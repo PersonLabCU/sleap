@@ -26,6 +26,8 @@ class FrameLoaderThread(QThread):
 
     # Signal emitted when a frame is ready
     frameReady = Signal(int, QImage)  # (frame_idx, qimage)
+    # Signal emitted when a frame fails to load
+    frameError = Signal(int, str)  # (frame_idx, error_message)
 
     def __init__(self):
         super().__init__()
@@ -33,6 +35,9 @@ class FrameLoaderThread(QThread):
         self.stop_flag = threading.Event()
         self.current_video = None
         self.local_video_copy = None
+
+        # Mutex protecting video switch (request_frame vs worker loop)
+        self._video_lock = threading.Lock()
 
         # Performance tracking
         self._frame_load_times = deque(maxlen=100)
@@ -95,8 +100,10 @@ class FrameLoaderThread(QThread):
             if self.debug_mode:
                 print(f"[THREAD] Loading frame {frame_idx}")
 
-            # Load the frame
-            frame = video[frame_idx]
+            # Hold the lock while reading so a concurrent video switch on the
+            # main thread cannot close/replace the backend mid-read.
+            with self._video_lock:
+                frame = video[frame_idx]
 
             if frame is not None:
                 # Handle 4-channel images (RGBA/BGRA)
@@ -128,42 +135,49 @@ class FrameLoaderThread(QThread):
             else:
                 if self.debug_mode:
                     print(f"[THREAD] Frame {frame_idx} was None")
+                self.frameError.emit(frame_idx, "Frame data is empty")
 
         except Exception as e:
+            err_msg = str(e)
             if self.debug_mode:
-                print(f"[THREAD] Error processing frame {frame_idx}: {e}")
+                print(f"[THREAD] Error processing frame {frame_idx}: {err_msg}")
+            self.frameError.emit(frame_idx, err_msg)
 
     def request_frame(self, video: sio.Video, frame_idx: int):
         """Request a frame to be loaded (called from main thread)."""
         if self.debug_mode:
             print(f"[MAIN] Requesting frame {frame_idx}")
 
-        # Update the current video if a new one was provided
+        # Update the current video if a new one was provided.
+        # We close/reopen the backend outside the lock so the deepcopy
+        # (which can be slow) does not stall the worker thread.
         if self.current_video is not video:
             if self.debug_mode:
                 print("[MAIN] Switching to new video")
 
-            # Retain original state
+            # Retain original state before touching the video
             reopen = video.is_open
             open_backend = video.open_backend
 
-            # Close the backend
+            # Close the backend so deepcopy gets a clean, closed object
+            # (avoids copying open file handles / sockets).
             video.close()
             video.open_backend = False
 
-            # Update the reference
-            self.current_video = video
-
-            # Make a thread-local copy
-            self.local_video_copy = deepcopy(video)
-
-            # Set it to open the backend on first read
-            self.local_video_copy.open_backend = True
+            # Deep-copy while the backend is closed (outside the lock so
+            # the worker thread is not blocked during the potentially slow copy).
+            local_copy = deepcopy(video)
+            local_copy.open_backend = True
 
             # Restore the original state in the incoming video
-            self.current_video.open_backend = open_backend
+            video.open_backend = open_backend
             if reopen:
-                self.current_video.open()
+                video.open()
+
+            # Now hold the lock just long enough to swap the references atomically.
+            with self._video_lock:
+                self.current_video = video
+                self.local_video_copy = local_copy
 
         self.request_queue.put((self.local_video_copy, frame_idx))
 

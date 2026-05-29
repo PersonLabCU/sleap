@@ -17,6 +17,7 @@ from sleap_io import (
     Instance,
     PredictedInstance,
     LabeledFrame,
+    Labels,
     Video,
     Track,
 )
@@ -30,6 +31,7 @@ from sleap.gui.commands import (
     AddInstance,
     AddMissingInstanceNodes,
     AddUserInstancesFromPredictions,
+    SaveProjectAs,
 )
 
 
@@ -765,3 +767,25 @@ class TestFullWorkflowIntegration:
             "User instance created by double-click should be visible after "
             "predictions are deleted"
         )
+
+
+def test_save_repair_replaces_external_prediction_skeleton(simple_skeleton, simple_video):
+    """Save repair should canonicalize adopted linked-file preview predictions."""
+    external_skeleton = Skeleton(name="external")
+    for node_name in simple_skeleton.node_names:
+        external_skeleton.add_node(node_name)
+
+    pred = PredictedInstance.from_numpy(
+        np.zeros((len(external_skeleton.nodes), 2)),
+        skeleton=external_skeleton,
+        score=0.9,
+    )
+    user = Instance.empty(skeleton=simple_skeleton, from_predicted=pred)
+    lf = LabeledFrame(video=simple_video, frame_idx=0, instances=[pred, user])
+    labels = Labels(labeled_frames=[lf], skeletons=[simple_skeleton])
+    labels.skeletons = [simple_skeleton]
+
+    SaveProjectAs._repair_external_skeleton_refs(labels)
+
+    assert pred.skeleton is simple_skeleton
+    assert user.from_predicted.skeleton is simple_skeleton

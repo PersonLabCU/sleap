@@ -444,12 +444,12 @@ class VideoItemForInference(ItemForInference):
         ):
             arg_list.extend(("--video_input_format", self.video.backend.input_format))
 
-        # -Y represents endpoint of [X, Y) range but inference cli expects
-        # [X, Y-1] range (so add 1 since negative).
-        frame_int_list = list(set([i + 1 if i < 0 else i for i in self.frames]))
-        frame_int_list.sort(reverse=min(frame_int_list) < 0)  # Assumes len of 2 if neg.
-
-        arg_list.extend(("--frames", ",".join(map(str, frame_int_list))))
+        if self.frames is not None:
+            # -Y represents endpoint of [X, Y) range but inference cli expects
+            # [X, Y-1] range (so add 1 since negative).
+            frame_int_list = list(set([i + 1 if i < 0 else i for i in self.frames]))
+            frame_int_list.sort(reverse=min(frame_int_list) < 0)  # len 2 if negative
+            arg_list.extend(("--frames", ",".join(map(str, frame_int_list))))
 
         return arg_list
 

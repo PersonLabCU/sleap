@@ -5,6 +5,8 @@ Drop-in replacement for QSlider with additional features.
 from qtpy import QtCore, QtWidgets, QtGui
 from qtpy.QtGui import QPen, QBrush, QColor, QKeyEvent, QPolygonF, QPainterPath
 
+import logging
+
 from sleap.gui.color import ColorManager
 from sleap_io.model.instance import Track
 from sleap_io import Labels, Video
@@ -22,6 +24,9 @@ from sleap.sleap_io_adaptors.lf_labels_utils import (
 
 # for debug, we can filter out short tracks from slider
 SEEKBAR_MIN_TRACK_LEN_TO_SHOW = 0
+SEEKBAR_MAX_UNTRACKED_PREDICTION_MARKS = 5000
+
+logger = logging.getLogger(__name__)
 
 
 @attr.s(auto_attribs=True, eq=False)
@@ -57,13 +62,13 @@ class SliderMark:
     def color(self):
         """Returns color of mark."""
         colors = dict(
-            simple="black",
-            simple_thin="black",
-            filled="blue",
-            open="blue",
-            predicted=(1, 170, 247),  # light blue
-            tick="lightGray",
-            tick_column="gray",
+            simple=(52, 211, 153),      # emerald green - user labeled
+            simple_thin=(251, 191, 36), # amber - predicted, no track identity
+            filled=(99, 102, 241),      # indigo - suggested frame with user labels
+            open=(148, 163, 184),       # slate - suggested frame, empty
+            predicted=(56, 189, 248),   # sky blue - suggested frame with predictions
+            tick=(180, 180, 180),       # light gray tick marks
+            tick_column=(120, 120, 120),
         )
 
         if self.type in colors:
@@ -95,26 +100,24 @@ class SliderMark:
 
     @property
     def top_pad(self):
-        if self.type == "tick_column":
-            return 40
         if self.type == "tick":
             return 0
         return 2
 
     @property
     def bottom_pad(self):
-        if self.type == "tick_column":
-            return 200
         if self.type == "tick":
             return 0
         return 2
 
     @property
     def visual_width(self):
-        if self.type in ("open", "filled", "tick"):
+        if self.type in ("simple", "filled", "open", "predicted"):
+            return 6
+        if self.type == "simple_thin":
+            return 3
+        if self.type in ("tick", "tick_column"):
             return 2
-        if self.type in ("tick_column", "simple", "predicted"):
-            return 1
         return 0
 
     def get_height(self, container_height):
@@ -193,6 +196,8 @@ class VideoSlider(QtWidgets.QGraphicsView):
         self._track_stack_skip_count = 10
         self._header_label_height = 20
         self._header_graph_height = 40
+        self._event_bar_height = 0
+        self._event_bar_margin = 3
         self._header_height = self._header_label_height  # room for frame labels
         self._min_height = 19 + self._header_height
 
@@ -200,6 +205,9 @@ class VideoSlider(QtWidgets.QGraphicsView):
         self._base_font.setPixelSize(10)
 
         self._tick_marks = []
+        self._event_marks = []
+        self._event_mark_items = []
+        self._event_bar_item = None
 
         # Add border rect
         outline_rect = QtCore.QRectF(0, 0, 200, self._min_height - 3)
@@ -208,15 +216,16 @@ class VideoSlider(QtWidgets.QGraphicsView):
         # self.outlineBox.setPen(QPen(QColor("black", alpha=0)))
 
         # Add drag handle rect
-        self._handle_width = 6
+        self._handle_width = 10
         handle_rect = QtCore.QRect(
             0, self._handle_top, self._handle_width, self._handle_height
         )
         self.setMinimumHeight(self._min_height)
         self.setMaximumHeight(self._min_height)
         self.handle = self.scene.addRect(handle_rect)
-        self.handle.setPen(QPen(QColor(80, 80, 80)))
-        self.handle.setBrush(QColor(128, 128, 128, 128))
+        self.handle.setPen(QPen(QColor(20, 20, 20), 2))
+        self.handle.setBrush(QColor(50, 50, 50, 210))
+        self.handle.setZValue(20)
 
         # Add (hidden) rect to highlight selection
         self.select_box = self.scene.addRect(
@@ -233,7 +242,7 @@ class VideoSlider(QtWidgets.QGraphicsView):
         self.zoom_box.setBrush(QColor(80, 80, 80, 64))
         self.zoom_box.hide()
 
-        self.scene.setBackgroundBrush(QBrush(QColor(200, 200, 200)))
+        self.scene.setBackgroundBrush(QBrush(QColor(240, 240, 240)))
 
         self.clearSelection()
         self.setEnabled(True)
@@ -312,6 +321,8 @@ class VideoSlider(QtWidgets.QGraphicsView):
             )
 
             self._mark_items[mark].setRect(rect)
+
+        self._update_event_visual_positions()
 
     def _get_min_max_slider_heights(self):
         tracks = self._track_rows
@@ -759,6 +770,7 @@ class VideoSlider(QtWidgets.QGraphicsView):
             self._mark_labels[new_mark] = self.scene.addSimpleText(
                 mark_label_text, self._base_font
             )
+            self._mark_labels[new_mark].setPos(0, self._event_bar_height + 4)
         elif new_mark.type == "track":
             # Show tracks over tick marks
             self._mark_items[new_mark].setZValue(2)
@@ -811,6 +823,78 @@ class VideoSlider(QtWidgets.QGraphicsView):
 
     # Methods for header graph
 
+    def _base_header_height(self) -> int:
+        """Return header height from labels, graph, and optional events bar."""
+        graph_height = self._header_graph_height if len(self.headerSeries) else 0
+        return self._header_label_height + graph_height + self._event_bar_height
+
+    def _set_base_header_height(self):
+        self._header_height = self._base_header_height()
+
+    def clearEventMarks(self):
+        """Remove session event marks from the header bar."""
+        if self._event_bar_item is not None:
+            self.scene.removeItem(self._event_bar_item)
+            self._event_bar_item = None
+        for item in self._event_mark_items:
+            self.scene.removeItem(item)
+        self._event_mark_items = []
+        self._event_marks = []
+        self._event_bar_height = 0
+        self._set_base_header_height()
+        self._update_slider_height()
+
+    def setEventMarks(self, events: Optional[Iterable[dict]] = None):
+        """Show session event marks in a narrow bar above the frame timeline."""
+        for item in self._event_mark_items:
+            self.scene.removeItem(item)
+        self._event_mark_items = []
+
+        if self._event_bar_item is not None:
+            self.scene.removeItem(self._event_bar_item)
+            self._event_bar_item = None
+
+        self._event_marks = list(events or [])
+        self._event_bar_height = 18 if self._event_marks else 0
+        self._set_base_header_height()
+
+        if self._event_marks:
+            self._event_bar_item = self.scene.addRect(
+                0,
+                self._event_bar_margin,
+                self.box_rect.width(),
+                self._event_bar_height - (self._event_bar_margin * 2),
+                QPen(QColor(70, 70, 70, 80), 0.5),
+                QBrush(QColor(245, 245, 245, 180)),
+            )
+            self._event_bar_item.setZValue(0.5)
+            for event in self._event_marks:
+                color = QColor(*event["color"])
+                item = self.scene.addRect(
+                    -1,
+                    self._event_bar_margin + 1,
+                    3,
+                    self._event_bar_height - (self._event_bar_margin * 2) - 2,
+                    QPen(color, 0.5),
+                    QBrush(color),
+                )
+                item.setToolTip(f"{event['event']}: frame {int(event['frame']) + 1}")
+                item.setZValue(3)
+                self._event_mark_items.append(item)
+
+        self._update_slider_height()
+        self._update_event_visual_positions()
+
+    def _update_event_visual_positions(self):
+        """Update event bar and marker positions after resize/zoom changes."""
+        if self._event_bar_item is not None:
+            rect = self._event_bar_item.rect()
+            rect.setWidth(self.box_rect.width())
+            self._event_bar_item.setRect(rect)
+
+        for event, item in zip(self._event_marks, self._event_mark_items):
+            item.setPos(self._toPos(int(event["frame"]), center=True), 0)
+
     def setHeaderSeries(self, series: Optional[Dict[int, float]] = None):
         """Show header graph with specified series.
 
@@ -820,14 +904,14 @@ class VideoSlider(QtWidgets.QGraphicsView):
             None.
         """
         self.headerSeries = [] if series is None else series
-        self._header_height = self._header_label_height + self._header_graph_height
+        self._set_base_header_height()
         self._draw_header()
         self._update_slider_height()
 
     def clearHeader(self):
         """Remove header graph from slider."""
         self.headerSeries = []
-        self._header_height = self._header_label_height
+        self._set_base_header_height()
         self._update_slider_height()
 
     def _get_header_series_len(self):
@@ -1171,7 +1255,14 @@ class VideoSlider(QtWidgets.QGraphicsView):
         # Show tooltip with information about frame under mouse
         if self._get_val_tooltip:
             hover_frame_idx = self._toVal(self.mapMouseXToHandleX(scenePos.x()))
-            tooltip = self._get_val_tooltip(hover_frame_idx)
+            try:
+                tooltip = self._get_val_tooltip(hover_frame_idx)
+            except Exception:
+                logger.exception(
+                    "Failed to build seekbar tooltip for frame %s",
+                    hover_frame_idx,
+                )
+                tooltip = f"Frame {hover_frame_idx + 1}"
             QtWidgets.QToolTip.showText(event.globalPos(), tooltip)
 
         self.mouseMoved.emit(scenePos.x(), scenePos.y())
@@ -1233,6 +1324,30 @@ class SemanticMarkType(Enum):
     suggested_with_predicted = "predicted"
 
 
+def _find_labeled_frame_for_tooltip(
+    labels: "Labels", video: "Video", frame_idx: int
+):
+    """Return the last matching frame without rebuilding Labels' frame index.
+
+    Hovering the seekbar should be a cheap, read-only operation. Calling
+    ``Labels.find(video, frame_idx)`` can rebuild the internal frame index and
+    emit duplicate-frame warnings; if another GUI action is mutating labels at
+    the same time, that rebuild can fail. A direct scan is slower in theory but
+    only runs for one hovered frame and avoids touching the shared index.
+    """
+    if labels is None or video is None:
+        return None
+
+    match = None
+    for labeled_frame in getattr(labels, "labeled_frames", []) or []:
+        if labeled_frame.frame_idx != frame_idx:
+            continue
+        if labeled_frame.video is video:
+            match = labeled_frame
+
+    return match
+
+
 def set_slider_marks_from_labels(
     slider: VideoSlider,
     labels: "Labels",
@@ -1274,9 +1389,8 @@ def set_slider_marks_from_labels(
         elif "track" in frame_mark_types:
             tooltip += "\nprediction with track identity"
 
-        lf = labels.find(video, idx)
+        lf = _find_labeled_frame_for_tooltip(labels, video, idx)
         if lf:
-            lf = lf[0]
             user_instance_count = len(lf.user_instances)
             pred_instance_count = len(lf.predicted_instances)
 
@@ -1330,11 +1444,20 @@ def set_slider_marks_from_labels(
                     )
                 track_row += 1
 
-    # Frames with instance without track
+    # Frames with predicted instances without track. Full-video prediction files
+    # can have tens/hundreds of thousands of these; drawing one QGraphicsItem per
+    # frame makes the GUI sluggish. Keep a representative overview on the slider
+    # while preserving all user/suggestion marks below.
     untracked_frames = set()
     if None in track_occupancy:
         for occupancy_range in track_occupancy[None].list:
-            untracked_frames.update({val for val in range(*occupancy_range)})
+            start, end = occupancy_range
+            span = max(0, end - start)
+            if span <= SEEKBAR_MAX_UNTRACKED_PREDICTION_MARKS:
+                untracked_frames.update(range(start, end))
+            else:
+                step = max(1, span // SEEKBAR_MAX_UNTRACKED_PREDICTION_MARKS)
+                untracked_frames.update(range(start, end, step))
 
     labeled_marks = {lf.frame_idx for lf in lfs}
     user_labeled = {lf.frame_idx for lf in lfs if len(lf.user_instances)}

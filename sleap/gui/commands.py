@@ -62,14 +62,27 @@ from qtpy import QtCore, QtGui, QtWidgets
 
 from sleap.gui.dialogs.delete import DeleteDialog
 from sleap.gui.dialogs.filedialog import FileDialog
-from sleap.gui.dialogs.importvideos import ImportVideos
+from sleap.gui.dialogs.importvideos import (
+    HDF5_VIDEO_EXTS,
+    ImportVideos,
+    find_h5_video_datasets,
+)
 from sleap.gui.dialogs.merge import MergeDialog, ReplaceSkeletonTableDialog
 from sleap.gui.dialogs.message import MessageDialog
 from sleap.gui.dialogs.missingfiles import MissingFilesDialog
 from sleap.gui.dialogs.frame_range import FrameRangeDialog
 from sleap.gui.state import GuiState
 from sleap.gui.suggestions import VideoFrameSuggestions
-from sleap_io import LabeledFrame, Labels, save_file, SuggestionFrame
+from sleap.gui.session_events import maybe_load_session_events
+from sleap_io import (
+    Camera,
+    CameraGroup,
+    LabeledFrame,
+    Labels,
+    RecordingSession,
+    save_file,
+    SuggestionFrame,
+)
 
 try:
     from sleap_io.io.slp import ExportCancelled
@@ -93,6 +106,7 @@ from sleap.sleap_io_adaptors.skeleton_utils import (
     to_graph,
 )
 from sleap.sleap_io_adaptors.video_utils import video_util_reset
+from sleap.sleap_io_adaptors.instance_utils import align_labeled_frames_to_skeleton
 from sleap.sleap_io_adaptors.lf_labels_utils import (
     get_next_suggestion,
     track_swap,
@@ -102,13 +116,14 @@ from sleap.sleap_io_adaptors.lf_labels_utils import (
     load_labels_video_search,
     clear_suggestion,
     get_instances_to_show,
+    get_unused_predictions,
     get_predictions_on_user_frames,
     labels_add_video,
 )
 from sleap.sleap_io_adaptors.video_utils import get_last_frame_idx
 
 from sleap_io import save_skeleton
-from sleap.sleap_io_adaptors.video_utils import can_use_ffmpeg
+from sleap.sleap_io_adaptors.video_utils import available_video_exts, can_use_ffmpeg
 from sleap.info import align
 from sleap.io.format.adaptor import Adaptor
 from sleap.sleap_io_adaptors.lf_labels_utils import (
@@ -194,12 +209,29 @@ class AppCommand:
         """
         params = params or dict()
 
-        if hasattr(self, "ask_and_do") and callable(self.ask_and_do):
-            self.ask_and_do(context, params)
-        else:
-            okay = self.ask(context, params)
-            if okay:
-                self.do_with_signal(context, params)
+        try:
+            if hasattr(self, "ask_and_do") and callable(self.ask_and_do):
+                self.ask_and_do(context, params)
+            else:
+                okay = self.ask(context, params)
+                if okay:
+                    self.do_with_signal(context, params)
+        except Exception as e:
+            tb_str = traceback.format_exc()
+            logger.error(
+                "Error in command %s:\n%s", type(self).__name__, tb_str
+            )
+            parent = getattr(context, "app", None)
+            msg = QtWidgets.QMessageBox(parent)
+            msg.setIcon(QtWidgets.QMessageBox.Critical)
+            msg.setWindowTitle("Command Error")
+            msg.setText(
+                f"An error occurred while executing '{type(self).__name__}':\n\n{e}\n\n"
+                "Your labels have not been saved. Please save immediately."
+            )
+            msg.setDetailedText(tb_str)
+            msg.setStandardButtons(QtWidgets.QMessageBox.Ok)
+            msg.exec_()
 
     @staticmethod
     def ask(context: "CommandContext", params: dict) -> bool:
@@ -513,6 +545,14 @@ class CommandContext:
         """Shows gui for adding videos to project."""
         self.execute(AddVideo)
 
+    def addSession(self):
+        """Shows gui for adding a recording session to project."""
+        self.execute(AddSession)
+
+    def triangulateSessions(self, calibration_path: str):
+        """Predict missing session views from multi-view labels."""
+        self.execute(TriangulateSessionLabels, calibration_path=calibration_path)
+
     def showImportVideos(self, filenames: List[str]):
         """Show video importer GUI without the file browser."""
         self.execute(ShowImportVideos, filenames=filenames)
@@ -573,6 +613,10 @@ class CommandContext:
         """Deletes all predictions on current frame."""
         self.execute(DeleteFramePredictions)
 
+    def deleteSinglePrediction(self, instance: Instance, lf: LabeledFrame):
+        """Deletes a single predicted instance from its labeled frame."""
+        self.execute(DeleteSinglePrediction, instance=instance, lf=lf)
+
     def deleteClipPredictions(self):
         """Deletes all predictions within selected range of video frames."""
         self.execute(DeleteClipPredictions)
@@ -608,6 +652,8 @@ class CommandContext:
         location: Optional[QtCore.QPoint] = None,
         mark_complete: bool = False,
         offset: int = 0,
+        target_video: Optional[Video] = None,
+        target_frame_idx: Optional[int] = None,
     ):
         """Creates a new instance, copying node coordinates as appropriate.
 
@@ -619,7 +665,17 @@ class CommandContext:
                 method supports custom location).
             mark_complete: Whether to mark the instance as complete.
             offset: Offset to apply to the location if given.
+            target_video: Optional video to add the instance to.
+            target_frame_idx: Optional frame index to add the instance to.
         """
+        player = getattr(self.app, "player", None)
+        if target_video is None:
+            if player is not None and hasattr(player, "interaction_video"):
+                target_video = player.interaction_video()
+        if target_frame_idx is None:
+            if player is not None and hasattr(player, "interaction_frame_idx"):
+                target_frame_idx = player.interaction_frame_idx()
+
         self.execute(
             AddInstance,
             copy_instance=copy_instance,
@@ -627,6 +683,8 @@ class CommandContext:
             location=location,
             mark_complete=mark_complete,
             offset=offset,
+            target_video=target_video,
+            target_frame_idx=target_frame_idx,
         )
 
     def setPointLocations(
@@ -655,7 +713,18 @@ class CommandContext:
 
     def pasteInstance(self):
         """Paste the instance from the clipboard as a new copy."""
-        self.execute(PasteInstance)
+        target_video = None
+        target_frame_idx = None
+        player = getattr(self.app, "player", None)
+        if player is not None and hasattr(player, "interaction_video"):
+            target_video = player.interaction_video()
+        if player is not None and hasattr(player, "interaction_frame_idx"):
+            target_frame_idx = player.interaction_frame_idx()
+        self.execute(
+            PasteInstance,
+            target_video=target_video,
+            target_frame_idx=target_frame_idx,
+        )
 
     def deleteSelectedInstance(self):
         """Deletes currently selected instance."""
@@ -1060,12 +1129,84 @@ def get_new_version_filename(filename: str) -> str:
 
 class SaveProjectAs(AppCommand):
     @staticmethod
+    def _matching_project_skeleton(labels: Labels, source_skeleton):
+        """Return the project-owned skeleton matching source_skeleton."""
+        for skeleton in labels.skeletons:
+            if skeleton is source_skeleton:
+                return skeleton
+
+        source_names = list(getattr(source_skeleton, "node_names", []) or [])
+        for skeleton in labels.skeletons:
+            if list(skeleton.node_names) == source_names:
+                return skeleton
+
+        source_name_set = set(source_names)
+        for skeleton in labels.skeletons:
+            if set(skeleton.node_names) == source_name_set:
+                return skeleton
+
+        return labels.skeletons[0] if labels.skeletons else source_skeleton
+
+    @classmethod
+    def _repair_external_skeleton_refs(cls, labels: Labels) -> None:
+        """Replace instance skeleton refs with project-owned skeleton objects."""
+        project_skeleton_ids = {id(skeleton) for skeleton in labels.skeletons}
+        for lf in getattr(labels, "labeled_frames", []) or []:
+            for inst in getattr(lf, "instances", []) or []:
+                if id(inst.skeleton) not in project_skeleton_ids:
+                    inst.skeleton = cls._matching_project_skeleton(
+                        labels, inst.skeleton
+                    )
+                from_predicted = getattr(inst, "from_predicted", None)
+                if (
+                    from_predicted is not None
+                    and id(from_predicted.skeleton) not in project_skeleton_ids
+                ):
+                    from_predicted.skeleton = cls._matching_project_skeleton(
+                        labels, from_predicted.skeleton
+                    )
+
+    @staticmethod
+    def _is_permission_denied_error(error: Exception) -> bool:
+        """Return whether a save exception looks like a write-permission failure."""
+        message = str(error).lower()
+        return (
+            getattr(error, "errno", None) == 13
+            or "errno 13" in message
+            or "permission denied" in message
+        )
+
+    @classmethod
+    def _save_error_message(cls, error: Exception, filename: str) -> str:
+        """Build a user-facing save error with actionable recovery steps."""
+        message = f"An error occured when attempting to save:\n {error}\n\n"
+
+        if cls._is_permission_denied_error(error):
+            message += (
+                "SLEAP could not write to this file. This usually means the file is "
+                "open in another program, marked read-only, locked by the network "
+                "share, or you do not have overwrite permission for that folder.\n\n"
+                f"Try File > Save As and save a new version, such as:\n"
+                f"{get_new_version_filename(filename)}\n\n"
+                "If the S: drive keeps refusing writes, save a copy to a local folder "
+                "first so your edits are preserved."
+            )
+        else:
+            message += (
+                "Try saving your project with a different filename or in a different "
+                "format."
+            )
+
+        return message
+
+    @staticmethod
     def _try_save(context, labels: Labels, filename: str):
         """Helper function which attempts save and handles errors."""
         import sleap_io as sio
 
         success = False
         try:
+            SaveProjectAs._repair_external_skeleton_refs(labels)
             extension = (PurePath(filename).suffix)[1:]
             extension = None if (extension == "slp") else extension
             if extension == "nwb":
@@ -1077,15 +1218,8 @@ class SaveProjectAs(AppCommand):
             context.changestack_savepoint()
 
         except Exception as e:
-            message = (
-                f"An error occured when attempting to save:\n {e}\n\n"
-                "Try saving your project with a different filename or in a different "
-                "format."
-            )
+            message = SaveProjectAs._save_error_message(e, filename)
             QtWidgets.QMessageBox(text=message).exec_()
-
-        # Redraw. Not sure why, but sometimes we need to do this.
-        context.app.plotFrame()
 
         return success
 
@@ -2737,6 +2871,358 @@ class AddVideo(EditCommand):
         return len(params["import_list"]) > 0
 
 
+class AddSession(EditCommand):
+    topics = [UpdateTopic.video]
+
+    @staticmethod
+    def find_video_files(session_path: Union[str, Path]) -> List[str]:
+        """Find supported video files directly inside a session folder."""
+        session_path = Path(session_path)
+        supported_exts = {f".{ext.lower()}" for ext in available_video_exts()}
+        files = []
+        for path in sorted(session_path.iterdir(), key=lambda p: p.name.lower()):
+            suffix = path.suffix.lower()
+            if not path.is_file() or suffix not in supported_exts:
+                continue
+            # Session folders often contain project/prediction .slp files from
+            # prior analyses. Add Session should only import source videos.
+            if suffix == ".slp":
+                continue
+            if suffix in HDF5_VIDEO_EXTS and not find_h5_video_datasets(str(path)):
+                continue
+            files.append(str(path))
+        return files
+
+    @staticmethod
+    def _get_or_create_session(labels: Labels, session_path: str) -> RecordingSession:
+        session_path = str(Path(session_path))
+        for session in labels.sessions:
+            if session.metadata.get("session_path") == session_path:
+                return session
+
+        session = RecordingSession(
+            camera_group=CameraGroup(
+                cameras=[],
+                metadata={
+                    "session_name": Path(session_path).name,
+                    "session_path": session_path,
+                },
+            ),
+            metadata={
+                "session_name": Path(session_path).name,
+                "session_path": session_path,
+            },
+        )
+        labels.sessions.append(session)
+        return session
+
+    @staticmethod
+    def _camera_name_for_video(video: Video) -> str:
+        filename = (
+            video.filename[0] if isinstance(video.filename, list) else video.filename
+        )
+        return Path(filename).stem
+
+    @classmethod
+    def _add_video_to_session(
+        cls, session: RecordingSession, video: Video, session_path: str
+    ) -> None:
+        if video in session.videos:
+            return
+        camera = Camera(
+            name=cls._camera_name_for_video(video),
+            metadata={
+                "session_name": Path(session_path).name,
+                "session_path": str(Path(session_path)),
+            },
+        )
+        session.camera_group.cameras.append(camera)
+        session.add_video(video, camera)
+
+    @classmethod
+    def do_action(cls, context: CommandContext, params: dict):
+        import_list = params["import_list"]
+        session_path = params["session_path"]
+
+        new_videos = ImportVideos.create_videos(import_list)
+        session_count = len(context.labels.sessions)
+        session = cls._get_or_create_session(context.labels, session_path)
+        session_added = len(context.labels.sessions) > session_count
+        events_loaded = maybe_load_session_events(session, session_path)
+        first_added_video = None
+        added_count = 0
+        for video in new_videos:
+            before_count = len(context.labels.videos)
+            video = context.labels.add_video(video)
+            cls._add_video_to_session(session, video, session_path)
+            if len(context.labels.videos) > before_count:
+                added_count += 1
+                if first_added_video is None:
+                    first_added_video = video
+
+        if added_count or session_added or events_loaded:
+            context.labels.update()
+            context.changestack_push("add session")
+
+        if context.state["video"] is None:
+            context.state["video"] = first_added_video or (
+                session.videos[0] if session.videos else None
+            )
+
+    @classmethod
+    def ask(cls, context: CommandContext, params: dict) -> bool:
+        """Ask for a session folder and import supported videos from it."""
+        session_path = FileDialog.openDir(
+            context.app,
+            dir=None,
+            caption="Select recording session folder...",
+        )
+        if len(session_path) == 0:
+            return False
+
+        filenames = cls.find_video_files(session_path)
+        if len(filenames) == 0:
+            QtWidgets.QMessageBox.warning(
+                context.app,
+                "No Videos Found",
+                f"No supported videos were found in:\n{session_path}",
+            )
+            return False
+
+        messages = {
+            filename: f"Session: {Path(session_path).name}" for filename in filenames
+        }
+        params["import_list"] = ImportVideos().ask(
+            filenames=filenames, messages=messages
+        )
+        params["session_path"] = session_path
+
+        return len(params["import_list"]) > 0
+
+
+class TriangulateSessionLabels(EditCommand):
+    """Predict missing 2D labels in session videos using 3D triangulation."""
+
+    topics = [UpdateTopic.frame, UpdateTopic.labels, UpdateTopic.project_instances]
+
+    @classmethod
+    def do_action(cls, context: CommandContext, params: dict):
+        calibration_path = Path(params["calibration_path"]).expanduser()
+        if not calibration_path.exists() or not calibration_path.is_file():
+            raise FileNotFoundError("Select a valid calibration.toml file.")
+        if calibration_path.suffix.lower() != ".toml":
+            raise ValueError("Calibration file must be a .toml file.")
+
+        try:
+            from aniposelib.cameras import CameraGroup as AniposeCameraGroup
+        except ImportError as exc:
+            raise ImportError(
+                "aniposelib is not installed in this environment. "
+                "Install it with `uv sync --extra anipose`."
+            ) from exc
+
+        calibration = AniposeCameraGroup.load(str(calibration_path))
+        result = cls.triangulate_missing_views(context.labels, calibration)
+        params["result"] = result
+
+        if result["predicted_instances"] > 0:
+            context.labels.update()
+
+    @classmethod
+    def triangulate_missing_views(cls, labels: Labels, calibration) -> dict:
+        """Triangulate user labels and project them into unlabeled session views."""
+        result = {
+            "sessions": 0,
+            "eligible_frames": 0,
+            "predicted_instances": 0,
+            "skipped_sessions": [],
+        }
+
+        for session in getattr(labels, "sessions", []) or []:
+            videos = list(getattr(session, "videos", []) or [])
+            if len(videos) < 2:
+                continue
+
+            try:
+                session_calibration = cls._calibration_for_session(
+                    calibration, session, videos
+                )
+            except Exception as exc:
+                result["skipped_sessions"].append(
+                    f"{cls._session_name(session)}: {exc}"
+                )
+                continue
+
+            result["sessions"] += 1
+            frame_idxs = cls._session_user_frame_indices(labels, videos)
+            for frame_idx in frame_idxs:
+                if cls._count_views_with_user_instances(labels, videos, frame_idx) < 2:
+                    continue
+
+                frame_added = cls._triangulate_frame(
+                    labels, session_calibration, videos, frame_idx
+                )
+                if frame_added > 0:
+                    result["eligible_frames"] += 1
+                    result["predicted_instances"] += frame_added
+
+        return result
+
+    @staticmethod
+    def _session_name(session: RecordingSession) -> str:
+        return getattr(session, "metadata", {}).get("session_name", "session")
+
+    @classmethod
+    def _calibration_for_session(cls, calibration, session, videos: List[Video]):
+        session_names = cls._session_camera_names(session, videos)
+        calibration_names = list(calibration.get_names())
+
+        if session_names and all(name in calibration_names for name in session_names):
+            return calibration.subset_cameras_names(session_names)
+
+        if len(calibration.cameras) < len(videos):
+            raise ValueError(
+                "Calibration has fewer cameras than this session "
+                f"({len(calibration.cameras)} < {len(videos)})."
+            )
+
+        return calibration.subset_cameras(range(len(videos)))
+
+    @staticmethod
+    def _session_camera_names(session, videos: List[Video]) -> List[str]:
+        cameras = list(getattr(session, "cameras", []) or [])
+        names = []
+        for idx, video in enumerate(videos):
+            if idx < len(cameras) and getattr(cameras[idx], "name", None):
+                names.append(cameras[idx].name)
+            else:
+                filename = (
+                    video.filename[0]
+                    if isinstance(video.filename, list)
+                    else video.filename
+                )
+                names.append(Path(str(filename)).stem)
+        return names
+
+    @classmethod
+    def _session_user_frame_indices(
+        cls, labels: Labels, videos: List[Video]
+    ) -> List[int]:
+        frame_idxs = set()
+        for video in videos:
+            for labeled_frame in labels.find(video):
+                if cls._user_instances(labeled_frame):
+                    frame_idxs.add(labeled_frame.frame_idx)
+        return sorted(frame_idxs)
+
+    @classmethod
+    def _count_views_with_user_instances(
+        cls, labels: Labels, videos: List[Video], frame_idx: int
+    ) -> int:
+        count = 0
+        for video in videos:
+            labeled_frame = cls._find_frame(labels, video, frame_idx)
+            if labeled_frame is not None and cls._user_instances(labeled_frame):
+                count += 1
+        return count
+
+    @staticmethod
+    def _find_frame(labels: Labels, video: Video, frame_idx: int):
+        frames = labels.find(video, frame_idx)
+        return frames[0] if frames else None
+
+    @staticmethod
+    def _user_instances(labeled_frame: Optional[LabeledFrame]) -> List[Instance]:
+        if labeled_frame is None:
+            return []
+        if hasattr(labeled_frame, "user_instances"):
+            return list(labeled_frame.user_instances)
+        return [
+            inst
+            for inst in getattr(labeled_frame, "instances", [])
+            if not isinstance(inst, PredictedInstance)
+        ]
+
+    @classmethod
+    def _triangulate_frame(
+        cls, labels: Labels, calibration, videos: List[Video], frame_idx: int
+    ) -> int:
+        source_by_view = []
+        target_view_indices = []
+        for view_idx, video in enumerate(videos):
+            labeled_frame = cls._find_frame(labels, video, frame_idx)
+            user_instances = cls._user_instances(labeled_frame)
+            source_by_view.append(user_instances)
+
+            has_any_instances = bool(
+                labeled_frame is not None and getattr(labeled_frame, "instances", [])
+            )
+            if not user_instances and not has_any_instances:
+                target_view_indices.append(view_idx)
+
+        if len([instances for instances in source_by_view if instances]) < 2:
+            return 0
+
+        added = 0
+        for _, grouped_instances in cls._iter_instance_groups(source_by_view):
+            source_items = [
+                (view_idx, inst)
+                for view_idx, inst in grouped_instances.items()
+                if inst is not None
+            ]
+            if len(source_items) < 2:
+                continue
+
+            skeleton = source_items[0][1].skeleton
+            points = np.full((len(videos), len(skeleton.nodes), 2), np.nan)
+            for view_idx, instance in source_items:
+                points[view_idx] = instance.numpy()
+
+            points3d = calibration.triangulate(points)
+            projected = calibration.project(points3d)
+
+            for view_idx in target_view_indices:
+                video = videos[view_idx]
+                if frame_idx > get_last_frame_idx(video):
+                    continue
+
+                points2d = projected[view_idx]
+                if np.all(np.isnan(points2d)):
+                    continue
+
+                point_scores = np.isfinite(points2d[:, 0]).astype(float)
+                predicted = PredictedInstance.from_numpy(
+                    points2d,
+                    skeleton=skeleton,
+                    point_scores=point_scores,
+                    score=float(np.nanmean(point_scores)),
+                    track=source_items[0][1].track,
+                )
+                target_frame = labels.find(video, frame_idx, return_new=True)[0]
+                target_frame.instances.append(predicted)
+                if target_frame not in labels:
+                    labels.append(target_frame)
+                added += 1
+
+        return added
+
+    @staticmethod
+    def _iter_instance_groups(source_by_view: List[List[Instance]]):
+        tracked_groups = {}
+        untracked_groups = {}
+
+        for view_idx, instances in enumerate(source_by_view):
+            for inst_idx, instance in enumerate(instances):
+                if instance.track is not None:
+                    tracked_groups.setdefault(instance.track, {})[view_idx] = instance
+                else:
+                    untracked_groups.setdefault(inst_idx, {})[view_idx] = instance
+
+        if tracked_groups:
+            yield from tracked_groups.items()
+        yield from untracked_groups.items()
+
+
 class ShowImportVideos(EditCommand):
     topics = [UpdateTopic.video]
 
@@ -2937,7 +3423,7 @@ class RemoveVideo(EditCommand):
 
 
 class OpenSkeleton(EditCommand):
-    topics = [UpdateTopic.skeleton]
+    topics = [UpdateTopic.skeleton, UpdateTopic.frame, UpdateTopic.project_instances]
 
     @staticmethod
     def load_skeleton(filename: str):
@@ -3148,6 +3634,7 @@ class OpenSkeleton(EditCommand):
         # Add nodes that only exist in the new skeleton
         for node in add_nodes:
             try_and_skip_if_error(skeleton.add_node, node)
+        align_labeled_frames_to_skeleton(context.labels, skeleton)
 
         # Add edges
         skeleton.edges = []
@@ -3160,6 +3647,8 @@ class OpenSkeleton(EditCommand):
 
         # Set state of context
         context.state["skeleton"] = skeleton
+        if context.labels is not None:
+            context.labels.update()
 
 
 class SaveSkeleton(AppCommand):
@@ -3197,7 +3686,7 @@ class SaveSkeleton(AppCommand):
 
 
 class NewNode(EditCommand):
-    topics = [UpdateTopic.skeleton]
+    topics = [UpdateTopic.skeleton, UpdateTopic.frame, UpdateTopic.project_instances]
 
     @staticmethod
     def do_action(context: CommandContext, params: dict):
@@ -3208,17 +3697,31 @@ class NewNode(EditCommand):
             part_name = f"new_part_{i}"
             i += 1
 
-        # Add the node to the skeleton
-        context.state["skeleton"].add_node(part_name)
+        skeleton = context.state["skeleton"]
+        new_node = Node(part_name)
+
+        # Insert immediately after the currently selected node so the new row
+        # appears below the active row.  Fall back to appending when nothing is
+        # selected (preserves the original behaviour).
+        selected_node = context.state.get("selected_node")
+        if selected_node is not None and selected_node in skeleton:
+            insert_idx = skeleton.index(selected_node) + 1
+            skeleton.nodes.insert(insert_idx, new_node)
+            skeleton.rebuild_cache()
+        else:
+            skeleton.add_node(new_node)
 
         # The GUI's state["skeleton"] is an orphan until something attaches it to
         # labels.skeletons. Without this, a skeleton edited only via the side
         # panel (no labeled instances) is silently dropped on save (#2684).
         if (
             context.labels is not None
-            and context.state["skeleton"] not in context.labels.skeletons
+            and skeleton not in context.labels.skeletons
         ):
-            context.labels.skeletons.append(context.state["skeleton"])
+            context.labels.skeletons.append(skeleton)
+        align_labeled_frames_to_skeleton(context.labels, skeleton)
+        if context.labels is not None:
+            context.labels.update()
 
 
 class DeleteNode(EditCommand):
@@ -3685,6 +4188,36 @@ class TransposeInstances(EditCommand):
             )
 
 
+def _find_lf_for_instance(
+    context: "CommandContext",
+    instance: Union[Instance, PredictedInstance],
+) -> Optional[LabeledFrame]:
+    """Return the LabeledFrame at the current frame_idx that owns ``instance``.
+
+    context.state["labeled_frame"] always tracks the primary video.  In
+    multi-view sessions the selected instance may live in the secondary
+    video's frame, so we search both before giving up.
+    """
+    frame_idx = context.state["frame_idx"]
+    if frame_idx is None:
+        return None
+
+    primary_lf = context.state["labeled_frame"]
+    if primary_lf is not None and any(
+        inst is instance for inst in primary_lf.instances
+    ):
+        return primary_lf
+
+    player = getattr(context.app, "player", None)
+    secondary_video = getattr(player, "secondary_video", None) if player else None
+    if secondary_video is not None:
+        matches = context.labels.find(secondary_video, frame_idx)
+        if matches and any(inst is instance for inst in matches[0].instances):
+            return matches[0]
+
+    return None
+
+
 class DeleteSelectedInstance(EditCommand):
     topics = [UpdateTopic.frame, UpdateTopic.project_instances, UpdateTopic.suggestions]
 
@@ -3694,10 +4227,27 @@ class DeleteSelectedInstance(EditCommand):
         if selected_inst is None:
             return
 
-        remove_instance(
-            context.labels, instance=selected_inst, lf=context.state["labeled_frame"]
-        )
+        lf = _find_lf_for_instance(context, selected_inst)
+        if lf is None:
+            return
+
+        remove_instance(context.labels, instance=selected_inst, lf=lf)
         context.state["instance"] = None
+
+
+class DeleteSinglePrediction(EditCommand):
+    topics = [UpdateTopic.frame, UpdateTopic.project_instances, UpdateTopic.suggestions]
+
+    @staticmethod
+    def do_action(context: CommandContext, params: dict):
+        instance = params.get("instance")
+        lf = params.get("lf")
+        if instance is None or lf is None:
+            return
+        remove_instance(context.labels, instance=instance, lf=lf)
+        if context.state["instance"] == instance:
+            context.state["instance"] = None
+        context.changestack_push("delete prediction")
 
 
 class DeleteSelectedInstanceTrack(EditCommand):
@@ -3713,18 +4263,22 @@ class DeleteSelectedInstanceTrack(EditCommand):
         if selected_inst is None:
             return
 
+        lf = _find_lf_for_instance(context, selected_inst)
+        if lf is None:
+            return
+
         track = selected_inst.track
-        remove_instance(
-            context.labels, instance=selected_inst, lf=context.state["labeled_frame"]
-        )
+        remove_instance(context.labels, instance=selected_inst, lf=lf)
         context.state["instance"] = None
 
         if track is not None:
-            # remove any instance on this track
-            for lf in context.labels.find(context.state["video"]):
-                track_instances = filter(lambda inst: inst.track == track, lf.instances)
+            # Remove instances on this track from the same video as the deleted instance.
+            for lf_i in context.labels.find(lf.video):
+                track_instances = list(
+                    filter(lambda inst: inst.track == track, lf_i.instances)
+                )
                 for inst in track_instances:
-                    remove_instance(context.labels, instance=inst, lf=lf)
+                    remove_instance(context.labels, instance=inst, lf=lf_i)
 
 
 class DeleteDialogCommand(EditCommand):
@@ -4046,6 +4600,34 @@ class ClearSuggestions(EditCommand):
 class MergeProject(EditCommand):
     topics = [UpdateTopic.all]
 
+    @staticmethod
+    def _is_prediction_only(labels: Labels) -> bool:
+        """Return whether a labels object contains predictions and no user labels."""
+        has_predictions = False
+        for lf in getattr(labels, "labeled_frames", []) or []:
+            instances = list(getattr(lf, "instances", []) or [])
+            if not instances:
+                continue
+            for inst in instances:
+                if isinstance(inst, PredictedInstance):
+                    has_predictions = True
+                else:
+                    return False
+        return has_predictions
+
+    @classmethod
+    def _fast_merge_predictions(cls, context: CommandContext, new_labels: Labels) -> bool:
+        """Merge prediction-only labels without opening the expensive merge dialog."""
+        if not cls._is_prediction_only(new_labels):
+            return False
+
+        # The generic merge dialog deep-copies and analysis-merges the full
+        # project, which is prohibitively expensive for all-frame predictions.
+        # replace_predictions preserves user labels while avoiding duplicate
+        # prediction stacks that make rendering and saving progressively slower.
+        context.labels.merge(new_labels, frame="replace_predictions")
+        return True
+
     @classmethod
     def ask_and_do(cls, context: CommandContext, params: dict):
         filenames = params["filenames"]
@@ -4071,6 +4653,9 @@ class MergeProject(EditCommand):
                 filename, video_search=gui_video_callback
             )
 
+            if cls._fast_merge_predictions(context, new_labels):
+                continue
+
             # Merging data is handled by MergeDialog
             MergeDialog(base_labels=context.labels, new_labels=new_labels).exec_()
 
@@ -4087,8 +4672,29 @@ class AddInstance(EditCommand):
         location = params.get("location", None)
         mark_complete = params.get("mark_complete", False)
         offset = params.get("offset", 0)
+        target_video = params.get("target_video") or None
+        frame_idx = params.get("target_frame_idx", context.state["frame_idx"])
 
-        if context.state["labeled_frame"] is None:
+        # For the primary (current) video use the GUI's frame directly so that
+        # the new instance lands on the same object the GUI is already displaying.
+        # Only look up via labels.find() for a secondary/session video so that
+        # we can create a new LabeledFrame for a video the GUI isn't showing.
+        current_video = context.state["video"]
+        if (
+            (target_video is None or target_video is current_video)
+            and frame_idx == context.state["frame_idx"]
+        ):
+            target_video = current_video
+            target_labeled_frame = context.state["labeled_frame"]
+        else:
+            target_video = target_video or current_video
+            target_labeled_frame = (
+                context.labels.find(target_video, frame_idx, return_new=True)[0]
+                if frame_idx is not None
+                else None
+            )
+
+        if target_labeled_frame is None:
             return
 
         if len(context.state["skeleton"]) == 0:
@@ -4099,8 +4705,16 @@ class AddInstance(EditCommand):
             from_predicted,
             from_prev_frame,
         ) = AddInstance.find_instance_to_copy_from(
-            context, copy_instance=copy_instance, init_method=init_method
+            context,
+            copy_instance=copy_instance,
+            init_method=init_method,
+            video=target_video,
+            labeled_frame=target_labeled_frame,
+            frame_idx=frame_idx,
         )
+
+        if init_method == "prior_frame" and copy_instance is None:
+            return
 
         new_instance = AddInstance.create_new_instance(
             context=context,
@@ -4111,11 +4725,12 @@ class AddInstance(EditCommand):
             location=location,
             from_prev_frame=from_prev_frame,
             offset=offset,
+            video=target_video,
         )
 
         # add new instance
-        if new_instance not in context.state["labeled_frame"].instances:
-            context.state["labeled_frame"].instances.append(new_instance)
+        if new_instance not in target_labeled_frame.instances:
+            target_labeled_frame.instances.append(new_instance)
 
         existing_tracks = [track.name for track in context.labels.tracks]
         if (
@@ -4124,8 +4739,8 @@ class AddInstance(EditCommand):
         ):
             context.labels.tracks.append(new_instance.track)
 
-        if context.state["labeled_frame"] not in context.labels:
-            context.labels.append(context.state["labeled_frame"])
+        if target_labeled_frame not in context.labels:
+            context.labels.append(target_labeled_frame)
 
         context.labels.update()
 
@@ -4139,6 +4754,7 @@ class AddInstance(EditCommand):
         location: Optional[QtCore.QPoint],
         from_prev_frame: bool,
         offset: int = 0,
+        video: Optional[Video] = None,
     ) -> Instance:
         """Create new instance."""
 
@@ -4156,6 +4772,7 @@ class AddInstance(EditCommand):
             init_method=init_method,
             location=location,
             offset=offset,
+            video=video,
         )
 
         if has_missing_nodes:
@@ -4231,6 +4848,7 @@ class AddInstance(EditCommand):
         init_method: str,
         location: Optional[QtCore.QPoint] = None,
         offset: int = 0,
+        video: Optional[Video] = None,
     ) -> bool:
         """Sets visible nodes for new instance.
 
@@ -4254,7 +4872,7 @@ class AddInstance(EditCommand):
         # Calculate scale factor for getting new x and y values.
         # Get video from context since instances don't have frame attribute
         old_video = context.state.get("video") or context.labels.videos[0]
-        new_video = context.state.get("video") or context.labels.videos[0]
+        new_video = video or context.state.get("video") or context.labels.videos[0]
         old_size_width = old_video.shape[2]
         old_size_height = old_video.shape[1]
         new_size_width = new_video.shape[2]
@@ -4272,20 +4890,25 @@ class AddInstance(EditCommand):
                 (node for node in copy_instance if not np.any(np.isnan(node["xy"]))),
                 None,
             )
-            reference_x, reference_y = reference_node["xy"]
-            offset_x = location.x() - (reference_x * scale_width)
-            offset_y = location.y() - (reference_y * scale_height)
+            if reference_node is not None:
+                reference_x, reference_y = reference_node["xy"]
+                offset_x = location.x() - (reference_x * scale_width)
+                offset_y = location.y() - (reference_y * scale_height)
 
         # Go through each node in skeleton.
         for node in context.state["skeleton"].node_names:
             # If we're copying from a skeleton that has this node.
-            node_idx = context.state["skeleton"].node_names.index(node)
-            if node in copy_instance.skeleton.node_names and not np.any(
-                np.isnan(copy_instance.numpy()[node_idx])
+            if node in copy_instance.skeleton.node_names:
+                copy_node_idx = copy_instance.skeleton.node_names.index(node)
+            else:
+                copy_node_idx = None
+
+            if copy_node_idx is not None and not np.any(
+                np.isnan(copy_instance.numpy()[copy_node_idx])
             ):
                 # Ensure x, y inside current frame, then copy x, y, and visible.
                 # We don't want to copy a PredictedPoint or score attribute.
-                point_data = copy_instance[node_idx]
+                point_data = copy_instance[copy_node_idx]
                 x_old, y_old = point_data["xy"]
 
                 # Copy the instance without scale or offset if predicted
@@ -4342,6 +4965,9 @@ class AddInstance(EditCommand):
         context: CommandContext,
         copy_instance: Optional[Union[Instance, PredictedInstance]],
         init_method: bool,
+        video: Optional[Video] = None,
+        labeled_frame: Optional[LabeledFrame] = None,
+        frame_idx: Optional[int] = None,
     ) -> Tuple[
         Optional[Union[Instance, PredictedInstance]], Optional[PredictedInstance], bool
     ]:
@@ -4359,6 +4985,9 @@ class AddInstance(EditCommand):
 
         from_predicted = copy_instance
         from_prev_frame = False
+        video = video or context.state["video"]
+        labeled_frame = labeled_frame or context.state["labeled_frame"]
+        frame_idx = context.state["frame_idx"] if frame_idx is None else frame_idx
 
         if init_method == "best" and copy_instance is None:
             selected_inst = context.state["instance"]
@@ -4370,7 +4999,7 @@ class AddInstance(EditCommand):
         if (
             init_method == "best" and copy_instance is None
         ) or init_method == "prediction":
-            unused_predictions = context.state["labeled_frame"].unused_predictions
+            unused_predictions = get_unused_predictions(labeled_frame)
             if len(unused_predictions):
                 # If there are predicted instances that don't correspond to an instance
                 # in this frame, use the first predicted instance without
@@ -4383,29 +5012,29 @@ class AddInstance(EditCommand):
         ) or init_method == "prior_frame":
             # Otherwise, if there are instances in previous frames,
             # copy the points from one of those instances.
-            prev_idx = AddInstance.get_previous_frame_index(context)
+            prev_idx = AddInstance.get_previous_frame_index(
+                context, video=video, frame_idx=frame_idx
+            )
 
             if prev_idx is not None:
                 prev_lf = context.labels.find(
-                    context.state["video"], prev_idx, return_new=True
+                    video, prev_idx, return_new=True
                 )[0]
                 # Prefer user-corrected instances over their predicted
                 # counterparts so "Copy Prior Frame" picks up edits the user
                 # made in the previous frame (#1065).
                 prev_instances = AddInstance._effective_prior_instances(prev_lf)
-                if len(prev_instances) > len(context.state["labeled_frame"].instances):
+                if len(prev_instances) > len(labeled_frame.instances):
                     # If more instances in previous frame than current, then use the
                     # first unmatched instance.
                     copy_instance = prev_instances[
-                        len(context.state["labeled_frame"].instances)
+                        len(labeled_frame.instances)
                     ]
                     from_prev_frame = True
-                elif init_method == "best" and (
-                    context.state["labeled_frame"].instances
-                ):
+                elif init_method == "best" and labeled_frame.instances:
                     # Otherwise, if there are already instances in current frame,
                     # copy the points from the last instance added to frame.
-                    copy_instance = context.state["labeled_frame"].instances[-1]
+                    copy_instance = labeled_frame.instances[-1]
                 elif len(prev_instances):
                     # Otherwise use the last instance added to previous frame.
                     copy_instance = prev_instances[-1]
@@ -4417,23 +5046,25 @@ class AddInstance(EditCommand):
         return copy_instance, from_predicted, from_prev_frame
 
     @staticmethod
-    def get_previous_frame_index(context: CommandContext) -> Optional[int]:
+    def get_previous_frame_index(
+        context: CommandContext,
+        video: Optional[Video] = None,
+        frame_idx: Optional[int] = None,
+    ) -> Optional[int]:
         """Returns index of previous frame."""
-        from sleap.sleap_io_adaptors.lf_labels_utils import iterate_labeled_frames
+        video = video or context.state["video"]
+        frame_idx = context.state["frame_idx"] if frame_idx is None else frame_idx
+        if video is None or frame_idx is None:
+            return None
 
-        frames_iter = iterate_labeled_frames(
-            context.labels,
-            context.state["video"],
-            from_frame_idx=context.state["frame_idx"],
-            reverse=True,
-        )
-
-        try:
-            next_idx = next(frames_iter).frame_idx
-        except Exception:
-            return
-
-        return next_idx
+        prev_idx = None
+        for lf in context.labels.find(video):
+            lf_idx = getattr(lf, "frame_idx", None)
+            if lf_idx is None or lf_idx >= frame_idx:
+                continue
+            if prev_idx is None or lf_idx > prev_idx:
+                prev_idx = lf_idx
+        return prev_idx
 
     @staticmethod
     def _effective_prior_instances(
@@ -4444,7 +5075,7 @@ class AddInstance(EditCommand):
         # `lf.instances` would let "Copy Prior Frame" land on the stale
         # prediction; prefer the user version of each animal and drop
         # predictions whose user counterpart is already present.
-        return list(prev_lf.user_instances) + list(prev_lf.unused_predictions)
+        return list(prev_lf.user_instances) + list(get_unused_predictions(prev_lf))
 
 
 class SetInstancePointLocations(EditCommand):
@@ -4469,8 +5100,13 @@ class SetInstancePointLocations(EditCommand):
         nodes_locations = params["nodes_locations"]
 
         for node, (x, y) in nodes_locations.items():
-            if node in instance.skeleton.node_names:
-                instance[node]["xy"] = np.array([x, y])
+            node_name = node if isinstance(node, str) else node.name
+            if (
+                node_name in instance.skeleton.node_names
+                and np.isfinite(x)
+                and np.isfinite(y)
+            ):
+                instance[node_name]["xy"] = np.array([x, y])
 
 
 class SetInstancePointVisibility(EditCommand):
@@ -4495,7 +5131,8 @@ class SetInstancePointVisibility(EditCommand):
         visible = params["visible"]
 
         node_name = node if isinstance(node, str) else node.name
-        instance[node_name]["visible"] = visible
+        if node_name in instance.skeleton.node_names:
+            instance[node_name]["visible"] = visible
 
 
 class AddMissingInstanceNodes(EditCommand):
@@ -4697,7 +5334,7 @@ class AddUserInstancesFromPredictions(EditCommand):
             return
 
         new_instances = []
-        unused_predictions = context.state["labeled_frame"].unused_predictions
+        unused_predictions = get_unused_predictions(context.state["labeled_frame"])
         for predicted_instance in unused_predictions:
             new_instances.append(
                 cls.make_instance_from_predicted_instance(predicted_instance)
@@ -4736,7 +5373,19 @@ class PasteInstance(EditCommand):
     @classmethod
     def do_action(cls, context: CommandContext, params: dict):
         base_instance: Instance = context.state["clipboard_instance"]
-        current_frame: LabeledFrame = context.state["labeled_frame"]
+        target_video = params.get("target_video") or context.state["video"]
+        target_frame_idx = params.get("target_frame_idx", context.state["frame_idx"])
+        if (
+            target_video is context.state["video"]
+            and target_frame_idx == context.state["frame_idx"]
+        ):
+            current_frame: LabeledFrame = context.state["labeled_frame"]
+        else:
+            current_frame = (
+                context.labels.find(target_video, target_frame_idx, return_new=True)[0]
+                if target_video is not None and target_frame_idx is not None
+                else None
+            )
         if base_instance is None or current_frame is None:
             return
 

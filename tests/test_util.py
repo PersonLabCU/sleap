@@ -67,6 +67,17 @@ def test_config():
     assert os.path.exists(filename)
 
 
+def test_config_dir_env(monkeypatch, tmp_path):
+    import sleap.version as sleap_version
+
+    monkeypatch.setenv("SLEAP_CONFIG_DIR", str(tmp_path))
+
+    filename = get_config_file("shortcuts.yaml")
+
+    assert filename == tmp_path / sleap_version.__version__ / "shortcuts.yaml"
+    assert filename.exists()
+
+
 def test_scoped_dict():
     d = {"foo.x": 3, "foo.y": 5, "foo.z": None, "bar.z": 7}
 

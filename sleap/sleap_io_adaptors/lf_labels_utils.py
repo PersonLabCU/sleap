@@ -120,7 +120,10 @@ def remove_frames(labels: Labels, frames: List[LabeledFrame]):
 
 def remove_instance(labels: Labels, instance: Instance, lf: LabeledFrame):
     """Remove an instance from a labeled frame and update all related instances."""
-    lf_inst_to_remove = labels.find(video=lf.video, frame_idx=lf.frame_idx)[0]
+    matches = labels.find(video=lf.video, frame_idx=lf.frame_idx)
+    if not matches:
+        return
+    lf_inst_to_remove = matches[0]
     if lf_inst_to_remove:
         # Iterate backwards to safely remove from list
         for inst_idx in range(len(lf_inst_to_remove.instances) - 1, -1, -1):
@@ -128,7 +131,14 @@ def remove_instance(labels: Labels, instance: Instance, lf: LabeledFrame):
             if type(inst) != type(instance):
                 continue
 
-            # Compare instances using numpy arrays with NaN handling
+            # Prefer identity match (exact Python object) to avoid pose-collision
+            # edge cases with NaN coordinates or identical poses.
+            if inst is instance:
+                lf_inst_to_remove.instances.pop(inst_idx)
+                break
+
+            # Fall back to pose comparison for instances loaded from disk
+            # (identity may differ across serialization round-trips).
             points_match = inst.same_pose_as(instance)
 
             if points_match:
@@ -180,6 +190,14 @@ def remove_video(labels: Labels, video: Video):
         vid = labels.videos[vid_idx]
         if video is vid:
             labels.videos.pop(vid_idx)
+
+    # Remove video from any recording sessions that reference it.
+    if hasattr(labels, "sessions"):
+        for session in list(labels.sessions):
+            if video in session.videos:
+                session.remove_video(video)
+            if len(session.videos) == 0:
+                labels.sessions.remove(session)
 
     # Remove any suggestions for this video (moved outside loop, uses identity)
     if hasattr(labels, "suggestions"):
@@ -302,49 +320,39 @@ def get_unused_predictions(labeled_frame) -> List:
     Returns:
         List of unused PredictedInstance objects
     """
-    unused_predictions = []
-
-    # Check if labeled_frame has instances attribute
     if not hasattr(labeled_frame, "instances"):
-        return unused_predictions
+        return []
 
-    # Get all instances from the frame
-    instances = labeled_frame.instances if hasattr(labeled_frame, "instances") else []
+    instances = labeled_frame.instances
+    if not instances:
+        return []
 
-    any_tracks = [
-        inst.track
-        for inst in instances
-        if hasattr(inst, "track") and inst.track is not None
-    ]
-
-    if len(any_tracks):
+    if any(getattr(inst, "track", None) is not None for inst in instances):
         # Use tracks to determine which predicted instances have been used
         # A prediction is "used" if there's a user Instance in the same track
-        used_tracks = [
+        used_tracks = {
             inst.track
             for inst in instances
             if type(inst) is Instance and inst.track is not None
-        ]
-        unused_predictions = [
+        }
+        return [
             inst
             for inst in instances
             if inst.track not in used_tracks and type(inst) is PredictedInstance
         ]
-    else:
-        # Use from_predicted to determine which predicted instances have been used
-        # A prediction is "used" if a user Instance has from_predicted pointing to it
-        used_instances = [
-            inst.from_predicted
-            for inst in instances
-            if type(inst) is Instance and inst.from_predicted is not None
-        ]
-        unused_predictions = [
-            inst
-            for inst in instances
-            if type(inst) is PredictedInstance and inst not in used_instances
-        ]
 
-    return unused_predictions
+    # Use from_predicted to determine which predicted instances have been used
+    # when tracks are not available.
+    used_instance_ids = {
+        id(inst.from_predicted)
+        for inst in instances
+        if type(inst) is Instance and inst.from_predicted is not None
+    }
+    return [
+        inst
+        for inst in instances
+        if type(inst) is PredictedInstance and id(inst) not in used_instance_ids
+    ]
 
 
 def get_instances_to_show(labeled_frame) -> List:
@@ -362,22 +370,22 @@ def get_instances_to_show(labeled_frame) -> List:
     Returns:
         List of instances to show in GUI.
     """
-    unused_predictions = get_unused_predictions(labeled_frame)
-
     # Check if labeled_frame has instances attribute
     if not hasattr(labeled_frame, "instances"):
         return []
 
-    instances = labeled_frame.instances if hasattr(labeled_frame, "instances") else []
+    instances = labeled_frame.instances
+    if not instances:
+        return []
+
+    unused_prediction_ids = {id(inst) for inst in get_unused_predictions(labeled_frame)}
 
     # Show all user instances, plus any unused predictions
-    inst_to_show = [
+    return [
         inst
         for inst in instances
-        if type(inst) is Instance or inst in unused_predictions
+        if type(inst) is Instance or id(inst) in unused_prediction_ids
     ]
-
-    return inst_to_show
 
 
 def get_labeled_frame_count(labels, video=None, filter: str = "") -> int:
@@ -403,42 +411,34 @@ def get_labeled_frame_count(labels, video=None, filter: str = "") -> int:
     if filter not in ("", "user", "predicted"):
         raise ValueError(f"get_labeled_frame_count() invalid filter: {filter}")
 
-    # Get all labeled frames
-    if hasattr(labels, "labeled_frames"):
-        all_frames = labels.labeled_frames
+    if video is not None and hasattr(labels, "find"):
+        frames = labels.find(video)
+    elif hasattr(labels, "labeled_frames"):
+        frames = labels.labeled_frames
     elif hasattr(labels, "__iter__"):
-        # If labels is iterable, use it directly
-        all_frames = list(labels)
+        frames = labels
     else:
         return 0
 
-    # Apply video filter
-    if video is not None:
-        frames = [lf for lf in all_frames if hasattr(lf, "video") and lf.video == video]
-    else:
-        frames = all_frames
-
     # Apply type filter
     if filter == "":
-        # All labeled frames
-        return len(frames)
+        if video is not None or hasattr(frames, "__len__"):
+            return len(frames)
+        return sum(1 for _ in frames)
     elif filter == "user":
-        # Only frames with user instances
-        return len(
-            [
-                lf
-                for lf in frames
-                if hasattr(lf, "has_user_instances") and lf.has_user_instances
-            ]
+        return sum(
+            1
+            for lf in frames
+            if hasattr(lf, "has_user_instances") and lf.has_user_instances
         )
     elif filter == "predicted":
-        # Only frames with predicted instances
-        return len(
-            [
-                lf
-                for lf in frames
-                if hasattr(lf, "has_predicted_instances") and lf.has_predicted_instances
-            ]
+        return sum(
+            1
+            for lf in frames
+            if (
+                hasattr(lf, "has_predicted_instances")
+                and lf.has_predicted_instances
+            )
         )
 
     return 0
@@ -675,7 +675,12 @@ def get_template_instance_points(labels: Labels, skeleton: Skeleton):
 
         if skeleton_instances:
             # Get template points from aligned instances
-            template_points = align.get_template_points_array(skeleton_instances)
+            try:
+                template_points = align.get_template_points_array(skeleton_instances)
+            except Exception:
+                template_points = np.random.randint(
+                    0, 50, size=(len(skeleton.nodes), 2)
+                )
             return template_points
         else:
             # No valid instances, use fallback
@@ -1034,7 +1039,7 @@ def instances(
     skeleton: Optional[Skeleton] = None,
 ):
     for labeled_frame in labels.labeled_frames:
-        if labeled_frame.video is not None or labeled_frame.video == video:
+        if video is None or labeled_frame.video is video:
             for instance in labeled_frame.instances:
                 if skeleton is None or instance.skeleton == skeleton:
                     yield instance

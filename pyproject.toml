@@ -100,6 +100,11 @@ nn-tensorrt = [
     "sleap-nn[torch,tensorrt]>=0.2.0,<0.3.0; sys_platform != 'darwin'"
 ]
 
+anipose = [
+    "sleap-anipose>=0.0.8",
+    "opencv-contrib-python>=4.13",
+]
+
 [dependency-groups]
 # PEP 735: Dev-only dependencies (`dev` is installed automatically by `uv`)
 dev = [
@@ -143,6 +148,9 @@ sleap-nn-predict = "sleap.nn_cli:predict"
 # sleap-export = "sleap.legacy_cli_adaptors:export_cli"
 
 [tool.uv]
+cache-dir = ".uv-cache"
+link-mode = "copy"
+torch-backend = "cu128"
 index-url = "https://download.pytorch.org/whl/cu128"
 extra-index-url = ["https://pypi.org/simple"]
 conflicts = [

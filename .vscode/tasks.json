@@ -1,0 +1,60 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SLEAP: launch GUI",
+      "type": "shell",
+      "command": "uv",
+      "args": ["run", "--no-sync", "sleap"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}\\.uv-cache",
+          "UV_PYTHON_INSTALL_DIR": "${workspaceFolder}\\.uv-python",
+          "UV_PROJECT_ENVIRONMENT": "${workspaceFolder}\\.venv",
+          "SLEAP_CONFIG_DIR": "${workspaceFolder}\\.sleap",
+          "VIRTUAL_ENV": "${workspaceFolder}\\.venv",
+          "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SLEAP: doctor",
+      "type": "shell",
+      "command": "uv",
+      "args": ["run", "--no-sync", "sleap", "doctor"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}\\.uv-cache",
+          "UV_PYTHON_INSTALL_DIR": "${workspaceFolder}\\.uv-python",
+          "UV_PROJECT_ENVIRONMENT": "${workspaceFolder}\\.venv",
+          "SLEAP_CONFIG_DIR": "${workspaceFolder}\\.sleap",
+          "VIRTUAL_ENV": "${workspaceFolder}\\.venv",
+          "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SLEAP: tests",
+      "type": "shell",
+      "command": "uv",
+      "args": ["run", "--no-sync", "pytest"],
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": {
+          "UV_CACHE_DIR": "${workspaceFolder}\\.uv-cache",
+          "UV_PYTHON_INSTALL_DIR": "${workspaceFolder}\\.uv-python",
+          "UV_PROJECT_ENVIRONMENT": "${workspaceFolder}\\.venv",
+          "SLEAP_CONFIG_DIR": "${workspaceFolder}\\.sleap",
+          "VIRTUAL_ENV": "${workspaceFolder}\\.venv",
+          "PATH": "${workspaceFolder}\\.venv\\Scripts;${env:PATH}"
+        }
+      },
+      "group": "test",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -92,6 +92,9 @@ celerybeat-schedule
 # Environments
 .env
 .venv
+.sleap/
+.uv-cache/
+.uv-python/
 env/
 venv/
 ENV/
@@ -118,7 +121,11 @@ venv.bak/
 *.sublime-*
 
 # VSCode files
-.vscode/
+.vscode/*
+!.vscode/settings.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/sleap.env
 
 # OS generated files
 .DS_Store
