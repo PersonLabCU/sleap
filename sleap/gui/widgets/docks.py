@@ -980,6 +980,7 @@ class ReachesDock(DockWidget):
         content_layout.setContentsMargins(4, 4, 4, 4)
         content_layout.addWidget(self._create_nodes_groupbox())
         content_layout.addWidget(self._create_predictions_groupbox())
+        content_layout.addWidget(self._create_filter_groupbox())
         content_layout.addWidget(self._create_params_groupbox())
         content_layout.addWidget(self._create_results_groupbox())
         content_layout.addStretch()
@@ -1502,6 +1503,37 @@ class ReachesDock(DockWidget):
 
     # ── detection parameters ─────────────────────────────────────────────── #
 
+    def _create_filter_groupbox(self) -> QGroupBox:
+        gb = QGroupBox("Filter Parameters")
+        layout = QVBoxLayout()
+
+        form = QWidget()
+        form_layout = QFormLayout()
+
+        self._filter_hand_traces = QCheckBox("Filter LH/RH traces")
+        self._filter_hand_traces.setChecked(False)
+        form_layout.addRow("", self._filter_hand_traces)
+
+        self._filter_cutoff = QDoubleSpinBox()
+        self._filter_cutoff.setRange(0.1, 10000.0)
+        self._filter_cutoff.setValue(30.0)
+        self._filter_cutoff.setSingleStep(1.0)
+        self._filter_cutoff.setSuffix(" Hz")
+        self._filter_cutoff.setToolTip(
+            "First-order Butterworth cutoff. Sampling rate is read from the video."
+        )
+        self._filter_cutoff.setEnabled(False)
+        self._filter_hand_traces.toggled.connect(self._filter_cutoff.setEnabled)
+        form_layout.addRow("Cutoff frequency:", self._filter_cutoff)
+
+        self._filter_sampling_label = QLabel("Auto")
+        form_layout.addRow("Sampling rate:", self._filter_sampling_label)
+
+        form.setLayout(form_layout)
+        layout.addWidget(form)
+        gb.setLayout(layout)
+        return gb
+
     def _create_params_groupbox(self) -> QGroupBox:
         gb = QGroupBox("Detection Parameters")
         layout = QVBoxLayout()
@@ -1721,6 +1753,104 @@ class ReachesDock(DockWidget):
             )
             self._results_table.setItem(row, 4, outcome_item)
 
+    def upsert_reach(self, row: int, start: int, max_frame: int, end: int) -> None:
+        """Add or edit a curated reach from timeline-selected frame controls."""
+        from sleap.gui.reach_detection import ReachOutcome, ReachSegment
+
+        start = int(start)
+        max_frame = int(max_frame)
+        end = int(end)
+        reach = ReachSegment(
+            frame=start,
+            max_delta=max_frame - start,
+            dur=end - start,
+            outcome=ReachOutcome.UNCLASSIFIED,
+        )
+        if not reach.is_valid:
+            self._status_label.setText(
+                "Reach was not updated: start must be before max and end."
+            )
+            return
+
+        row = int(row)
+        old_detail = None
+        if 0 <= row < len(self._reaches):
+            old_reach = self._reaches[row]
+            reach = reach._replace(
+                outcome=old_reach.outcome,
+                hand_pos=getattr(old_reach, "hand_pos", 0),
+            )
+            if row < len(self._reach_details):
+                old_detail = dict(self._reach_details[row])
+            self._reaches[row] = reach
+            action = "Updated"
+        else:
+            self._reaches.append(reach)
+            action = "Added"
+
+        new_detail = self._detail_for_curated_reach(
+            reach,
+            old_detail=old_detail,
+            action="manual_edit" if action == "Updated" else "manual_add",
+        )
+        if 0 <= row < len(self._reach_details):
+            self._reach_details[row] = new_detail
+        elif self._reach_details:
+            self._reach_details.append(new_detail)
+
+        self._sort_reaches_and_details()
+        self._populate_table()
+        self._notify_reaches_changed()
+
+        selected_row = next(
+            (
+                idx
+                for idx, candidate in enumerate(self._reaches)
+                if candidate.frame == reach.frame
+                and candidate.max_frame == reach.max_frame
+                and candidate.end_frame == reach.end_frame
+            ),
+            None,
+        )
+        if selected_row is not None:
+            self._results_table.selectRow(selected_row)
+        self._status_label.setText(
+            f"{action} reach: F{reach.frame + 1}-F{reach.end_frame + 1}."
+        )
+
+    def _detail_for_curated_reach(
+        self,
+        reach,
+        old_detail: Optional[dict] = None,
+        action: str = "manual_edit",
+    ) -> dict:
+        detail = dict(old_detail or {})
+        detail.update(
+            {
+                "frame": int(reach.frame),
+                "max_frame": int(reach.max_frame),
+                "end_frame": int(reach.end_frame),
+                "dur": int(reach.dur),
+                "result": reach.outcome.name,
+                "detection_method": detail.get("detection_method", action),
+                "curation": action,
+                "first_peak_frame": int(reach.max_frame),
+                "is_multi_reach": bool(detail.get("is_multi_reach", False)),
+            }
+        )
+        return detail
+
+    def _sort_reaches_and_details(self) -> None:
+        if self._reach_details and len(self._reach_details) == len(self._reaches):
+            paired = sorted(
+                zip(self._reaches, self._reach_details),
+                key=lambda pair: pair[0].frame,
+            )
+            self._reaches = [reach for reach, _ in paired]
+            self._reach_details = [detail for _, detail in paired]
+        else:
+            self._reaches.sort(key=lambda reach: reach.frame)
+
     # ── table actions ─────────────────────────────────────────────────────── #
 
     def _jump_to_reach(self, row: int, column: int) -> None:
@@ -1737,6 +1867,9 @@ class ReachesDock(DockWidget):
             r._replace(outcome=outcome) if i in rows else r
             for i, r in enumerate(self._reaches)
         ]
+        for row in rows:
+            if 0 <= row < len(self._reach_details):
+                self._reach_details[row]["result"] = outcome.name
         self._populate_table()
         self._notify_reaches_changed()
 
@@ -1748,12 +1881,15 @@ class ReachesDock(DockWidget):
         for row in rows:
             if 0 <= row < len(self._reaches):
                 self._reaches.pop(row)
+            if 0 <= row < len(self._reach_details):
+                self._reach_details.pop(row)
         self._populate_table()
         self._notify_reaches_changed()
         self._status_label.setText(f"{len(self._reaches)} reach(es) remaining.")
 
     def _delete_all(self) -> None:
         self._reaches = []
+        self._reach_details = []
         self._populate_table()
         self._notify_reaches_changed()
         self._status_label.setText("All reaches cleared.")
@@ -1796,6 +1932,76 @@ class ReachesDock(DockWidget):
         self._status_label.setText(f"Saved {len(self._reaches)} reach(es).")
 
     # ── detection ─────────────────────────────────────────────────────────── #
+
+    def _filter_hand_trajectories(self, lh_traj, rh_traj, frame_rate: float):
+        """Apply optional first-order Butterworth filtering to LH/RH traces."""
+        import numpy as np
+
+        enabled = (
+            hasattr(self, "_filter_hand_traces")
+            and self._filter_hand_traces.isChecked()
+        )
+        cutoff = (
+            float(self._filter_cutoff.value())
+            if hasattr(self, "_filter_cutoff")
+            else 30.0
+        )
+        info = {
+            "enabled": bool(enabled),
+            "cutoff_frequency_hz": float(cutoff),
+            "sampling_rate_hz": float(frame_rate),
+            "order": 1,
+            "normalization": "cutoff_frequency_hz / sampling_rate_hz",
+            "filtered_traces": [],
+        }
+
+        if hasattr(self, "_filter_sampling_label"):
+            self._filter_sampling_label.setText(f"{float(frame_rate):.3g} Hz")
+
+        if not enabled:
+            return lh_traj, rh_traj, info
+        if not np.isfinite(frame_rate) or frame_rate <= 0:
+            raise ValueError("Cannot filter hand traces without a positive sampling rate.")
+        if cutoff <= 0 or cutoff >= frame_rate:
+            raise ValueError(
+                "Butterworth cutoff frequency must be greater than 0 and less "
+                "than the sampling rate."
+            )
+
+        lh_filtered = self._butterworth_filter_trace(lh_traj, cutoff, frame_rate)
+        rh_filtered = self._butterworth_filter_trace(rh_traj, cutoff, frame_rate)
+        info["filtered_traces"] = ["left_hand", "right_hand"]
+        return lh_filtered, rh_filtered, info
+
+    @staticmethod
+    def _butterworth_filter_trace(trace, cutoff_frequency: float, sampling_rate: float):
+        """Filter each coordinate axis while preserving the original NaN mask."""
+        import numpy as np
+        from scipy.signal import butter, filtfilt
+
+        arr = np.asarray(trace, dtype=np.float64)
+        if arr.ndim != 2 or arr.size == 0:
+            return arr.copy()
+
+        filtered = arr.copy()
+        normalized_cutoff = float(cutoff_frequency) / float(sampling_rate)
+        b, a = butter(1, normalized_cutoff)
+        min_samples = 3 * max(len(a), len(b)) + 1
+
+        for dim in range(arr.shape[1]):
+            values = arr[:, dim]
+            valid = np.isfinite(values)
+            if int(np.sum(valid)) < min_samples:
+                continue
+            idx = np.arange(values.size)
+            interpolated = np.interp(idx, idx[valid], values[valid])
+            try:
+                smoothed = filtfilt(b, a, interpolated)
+            except ValueError:
+                continue
+            smoothed[~valid] = np.nan
+            filtered[:, dim] = smoothed
+        return filtered
 
     def _run_detection(self) -> None:
         import numpy as np
@@ -1916,6 +2122,15 @@ class ReachesDock(DockWidget):
                 pellet_traj = np.full_like(rh_traj, np.nan, dtype=np.float64)
                 pellet_conf = None
 
+        frame_rate = self._video_frame_rate(src_video) if src_video is not None else 30.0
+        try:
+            lh_traj, rh_traj, filter_info = self._filter_hand_trajectories(
+                lh_traj, rh_traj, frame_rate
+            )
+        except ValueError as exc:
+            self._status_label.setText(str(exc))
+            return
+
         dims_to_check = 3 if points3d_source is not None else 2
         lh_valid = (
             int(np.sum(
@@ -2014,7 +2229,6 @@ class ReachesDock(DockWidget):
                 )
         has_events = bool(events)
 
-        frame_rate = self._video_frame_rate(src_video) if src_video is not None else 30.0
         detection_parameters = {
             "method": detection_method,
             "kpn_outward_threshold": float(self._min_thresh.value()),
@@ -2028,6 +2242,7 @@ class ReachesDock(DockWidget):
             "max_dist_from_home": float(self._max_dist_home.value()),
             "point_confidence_threshold": float(point_confidence),
             "hand_confidence_aggregation": "median",
+            "filter": filter_info,
         }
         if detection_method == "absolute":
             axis_idx = int(self._absolute_axis_combo.currentData())

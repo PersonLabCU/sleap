@@ -306,6 +306,43 @@ class QtVideoPlayer(QWidget):
         _tl_header_layout.addWidget(_tl_label)
         _tl_header_layout.addStretch()
 
+        self._tl_event_combo = QtWidgets.QComboBox()
+        self._tl_event_combo.setStyleSheet(
+            "QComboBox { background: #1e2030; color: #9ca3af; "
+            "font-size: 10px; border: 1px solid #374151; "
+            "border-radius: 3px; padding: 1px 4px; }"
+            "QComboBox::drop-down { width: 14px; }"
+        )
+        self._tl_event_combo.setMinimumWidth(100)
+        self._tl_event_combo.setToolTip("Session event type")
+        _tl_header_layout.addWidget(self._tl_event_combo)
+
+        _event_button_style = (
+            "QToolButton { background: #1e2030; color: #9ca3af; "
+            "font-size: 10px; border: 1px solid #374151; "
+            "border-radius: 3px; padding: 0; }"
+            "QToolButton:disabled { color: #4b5563; }"
+        )
+        self._tl_prev_event_btn = QtWidgets.QToolButton()
+        self._tl_prev_event_btn.setText("<")
+        self._tl_prev_event_btn.setFixedSize(22, 20)
+        self._tl_prev_event_btn.setStyleSheet(_event_button_style)
+        self._tl_prev_event_btn.setToolTip("Previous selected session event")
+        self._tl_prev_event_btn.clicked.connect(
+            lambda: self._jump_timeline_event(-1)
+        )
+        _tl_header_layout.addWidget(self._tl_prev_event_btn)
+
+        self._tl_next_event_btn = QtWidgets.QToolButton()
+        self._tl_next_event_btn.setText(">")
+        self._tl_next_event_btn.setFixedSize(22, 20)
+        self._tl_next_event_btn.setStyleSheet(_event_button_style)
+        self._tl_next_event_btn.setToolTip("Next selected session event")
+        self._tl_next_event_btn.clicked.connect(
+            lambda: self._jump_timeline_event(1)
+        )
+        _tl_header_layout.addWidget(self._tl_next_event_btn)
+
         _span_label = QtWidgets.QLabel("±")
         _span_label.setStyleSheet("color: #6b7280; font-size: 10px;")
         _tl_header_layout.addWidget(_span_label)
@@ -329,6 +366,10 @@ class QtVideoPlayer(QWidget):
             )
         )
         _tl_header_layout.addWidget(self._tl_span_combo)
+        self.zoomed_timeline.eventNamesChanged.connect(
+            self._set_timeline_event_names
+        )
+        self._set_timeline_event_names([])
 
         # Container widget holding header + timeline
         self.zoomed_timeline_panel = QtWidgets.QWidget()
@@ -398,6 +439,35 @@ class QtVideoPlayer(QWidget):
 
         if video is not None:
             self.load_video(video)
+
+    def _set_timeline_event_names(self, names: List[str]) -> None:
+        """Refresh event navigation choices in the timeline header."""
+        selected = self._tl_event_combo.currentText()
+        self._tl_event_combo.blockSignals(True)
+        self._tl_event_combo.clear()
+        if names:
+            self._tl_event_combo.addItems(list(names))
+            idx = self._tl_event_combo.findText(selected)
+            if idx >= 0:
+                self._tl_event_combo.setCurrentIndex(idx)
+            self._tl_event_combo.setEnabled(True)
+            self._tl_prev_event_btn.setEnabled(True)
+            self._tl_next_event_btn.setEnabled(True)
+        else:
+            self._tl_event_combo.addItem("No events")
+            self._tl_event_combo.setEnabled(False)
+            self._tl_prev_event_btn.setEnabled(False)
+            self._tl_next_event_btn.setEnabled(False)
+        self._tl_event_combo.blockSignals(False)
+
+    def _jump_timeline_event(self, direction: int) -> None:
+        """Navigate to the previous or next selected session event."""
+        if not self._tl_event_combo.isEnabled():
+            return
+        self.zoomed_timeline.jump_to_event(
+            self._tl_event_combo.currentText(),
+            direction,
+        )
 
     def _setup_worker_thread(self):
         """Set up the worker thread using simple QThread.run() approach."""

@@ -3,8 +3,11 @@ from pathlib import Path
 
 import h5py
 import numpy as np
+from qtpy.QtWidgets import QCheckBox, QDoubleSpinBox, QLabel, QTableWidget
 
 from sleap.gui.reach_detection import (
+    ReachOutcome,
+    ReachSegment,
     detect_reaches_absolute,
     detect_reaches_kpn,
     extract_hand_position_3d_with_confidence,
@@ -232,31 +235,28 @@ def test_detect_reaches_absolute_classifies_with_pellet_logic():
     assert details[0]["pellet_method"] == "right_hand"
 
 
-def test_save_kpn_reach_details_csv_includes_confidence_columns():
-    out_file = Path("tests/gui/_tmp_reach_details.csv")
-    try:
-        save_kpn_reach_details_csv(
-            [
-                {
-                    "frame": 1,
-                    "max_frame": 3,
-                    "end_frame": 5,
-                    "dur": 4,
-                    "result": "GRABBED",
-                    "rh_conf_median": 0.8,
-                    "pellet_conf_at_loss": 0.2,
-                }
-            ],
-            out_file,
-        )
+def test_save_kpn_reach_details_csv_includes_confidence_columns(tmp_path):
+    out_file = tmp_path / "_tmp_reach_details.csv"
+    save_kpn_reach_details_csv(
+        [
+            {
+                "frame": 1,
+                "max_frame": 3,
+                "end_frame": 5,
+                "dur": 4,
+                "result": "GRABBED",
+                "rh_conf_median": 0.8,
+                "pellet_conf_at_loss": 0.2,
+            }
+        ],
+        out_file,
+    )
 
-        with out_file.open(newline="", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
+    with out_file.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
 
-        assert rows[0]["rh_conf_median"] == "0.8"
-        assert rows[0]["pellet_conf_at_loss"] == "0.2"
-    finally:
-        out_file.unlink(missing_ok=True)
+    assert rows[0]["rh_conf_median"] == "0.8"
+    assert rows[0]["pellet_conf_at_loss"] == "0.2"
 
 
 def test_projection_camera_matching_uses_embedded_camera_tokens():
@@ -420,6 +420,77 @@ def test_reaches_prediction_source_loads_nwb(monkeypatch):
     assert labels == "labels"
     assert kind == "nwb"
     assert calls["nwb"] == "predictions.nwb"
+
+
+def test_reaches_dock_upsert_reach_updates_table_and_sort(qtbot):
+    dock = ReachesDock.__new__(ReachesDock)
+    dock._reaches = [
+        ReachSegment(20, 4, 9, ReachOutcome.GRABBED),
+        ReachSegment(5, 2, 6, ReachOutcome.MISSED),
+    ]
+    dock._reach_details = [
+        {"frame": 20, "max_frame": 24, "end_frame": 29, "result": "GRABBED"},
+        {"frame": 5, "max_frame": 7, "end_frame": 11, "result": "MISSED"},
+    ]
+    dock._results_table = QTableWidget(0, 5)
+    dock._status_label = QLabel()
+    calls = []
+    dock.on_reaches_changed = lambda reaches: calls.append(list(reaches))
+
+    dock._sort_reaches_and_details()
+    dock._populate_table()
+
+    dock.upsert_reach(0, 12, 15, 19)
+
+    assert [(r.frame, r.max_frame, r.end_frame, r.outcome) for r in dock._reaches] == [
+        (12, 15, 19, ReachOutcome.MISSED),
+        (20, 24, 29, ReachOutcome.GRABBED),
+    ]
+    assert dock._results_table.item(0, 0).text() == "13"
+    assert dock._results_table.item(0, 1).text() == "16"
+    assert dock._reach_details[0]["curation"] == "manual_edit"
+    assert dock._reach_details[0]["result"] == "MISSED"
+    assert calls[-1] == dock._reaches
+
+    dock.upsert_reach(-1, 2, 4, 7)
+
+    assert [r.frame for r in dock._reaches] == [2, 12, 20]
+    assert dock._results_table.item(0, 0).text() == "3"
+    assert dock._reach_details[0]["curation"] == "manual_add"
+
+
+def test_reaches_dock_filter_hand_trajectories_preserves_nan(qtbot):
+    dock = ReachesDock.__new__(ReachesDock)
+    dock._filter_hand_traces = QCheckBox()
+    dock._filter_hand_traces.setChecked(True)
+    dock._filter_cutoff = QDoubleSpinBox()
+    dock._filter_cutoff.setRange(0.1, 10000.0)
+    dock._filter_cutoff.setValue(30.0)
+    dock._filter_sampling_label = QLabel()
+
+    t = np.linspace(0, 2 * np.pi, 80)
+    signal = np.column_stack(
+        [
+            np.sin(t) + 0.25 * np.sin(20 * t),
+            np.cos(t) + 0.25 * np.cos(20 * t),
+            np.sin(0.5 * t),
+        ]
+    )
+    lh = signal.copy()
+    rh = signal.copy()
+    rh[10, 0] = np.nan
+
+    filtered_lh, filtered_rh, info = dock._filter_hand_trajectories(
+        lh, rh, frame_rate=150.0
+    )
+
+    assert info["enabled"]
+    assert info["cutoff_frequency_hz"] == 30.0
+    assert info["sampling_rate_hz"] == 150.0
+    assert info["normalization"] == "cutoff_frequency_hz / sampling_rate_hz"
+    assert np.isnan(filtered_rh[10, 0])
+    assert not np.allclose(filtered_lh[:, 0], lh[:, 0])
+    assert dock._filter_sampling_label.text() == "150 Hz"
 
 
 def test_translate_points3d_h5_uses_selected_node_as_frame_origin(tmp_path):

@@ -11,7 +11,7 @@ QGraphicsView/QGraphicsScene infrastructure (no extra dependencies required).
 from bisect import bisect_left, bisect_right
 from typing import Dict, Iterable, List, Optional
 
-from qtpy import QtWidgets
+from qtpy import QtCore, QtWidgets
 from qtpy.QtCore import Qt, QLineF, QPointF, QRectF
 from qtpy.QtGui import (
     QBrush,
@@ -73,6 +73,8 @@ _TICK_COLOR = QColor(70, 75, 92)
 _LABEL_COLOR = QColor(105, 110, 132)
 _CF_COLOR = QColor(255, 255, 255)
 _CURSOR_COLOR = QColor(200, 205, 220, 170)
+_EDIT_COLOR = QColor(250, 204, 21)
+_EDIT_PREVIEW_COLOR = QColor(250, 204, 21, 95)
 
 
 class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
@@ -86,6 +88,9 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
 
     Clicking inside the widget navigates to that frame.
     """
+
+    reachEditRequested = QtCore.Signal(int, int, int, int)
+    eventNamesChanged = QtCore.Signal(list)
 
     TIME_SPANS = [50, 100, 200, 500, 1000, 5000]
     DEFAULT_SPAN = 200
@@ -103,6 +108,11 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         }
         self._events: List[dict] = []
         self._reaches: List = []  # List[ReachSegment], typed lazily
+        self._is_hovering: bool = False
+        self._reach_edit_active: bool = False
+        self._reach_edit_stage: str = ""
+        self._reach_edit_index: int = -1
+        self._reach_edit_frames: Dict[str, int] = {}
 
         # ── scene setup ──────────────────────────────────────────────────── #
         self._scene = QtWidgets.QGraphicsScene()
@@ -111,6 +121,7 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.setFixedHeight(_H + 4)
+        self.setFocusPolicy(Qt.StrongFocus)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
         )
@@ -163,11 +174,17 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._cursor_lbl.setZValue(26)
         self._cursor_lbl.hide()
 
+        self._edit_lbl = self._scene.addSimpleText("", _lbl_font)
+        self._edit_lbl.setBrush(QBrush(_EDIT_COLOR))
+        self._edit_lbl.setZValue(27)
+        self._edit_lbl.hide()
+
         # ── mutable items rebuilt on each update ─────────────────────────── #
         self._tick_items: List = []
         self._tick_label_items: List = []
         self._event_items: List = []
         self._reach_items: List = []
+        self._reach_edit_items: List = []
 
         # ── connect to state ─────────────────────────────────────────────── #
         state.connect("frame_idx", self._on_frame_changed)
@@ -201,7 +218,42 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
     def set_events(self, events: Optional[Iterable[dict]]) -> None:
         """Update session-event markers shown in the zoomed timeline."""
         self._events = list(events or [])
+        self.eventNamesChanged.emit(self.event_names())
         self._update_event_items()
+
+    def event_names(self) -> List[str]:
+        """Return unique event names available for timeline navigation."""
+        return sorted(
+            {
+                str(event.get("event", ""))
+                for event in self._events
+                if str(event.get("event", ""))
+            }
+        )
+
+    def jump_to_event(self, event_name: str, direction: int) -> bool:
+        """Move the current frame to the previous or next event of a type."""
+        if not event_name:
+            return False
+
+        frames = sorted(
+            int(event["frame"])
+            for event in self._events
+            if str(event.get("event", "")) == str(event_name)
+        )
+        if not frames:
+            return False
+
+        current = int(self._curr_frame)
+        if direction < 0:
+            before = [frame for frame in frames if frame < current]
+            target = before[-1] if before else frames[-1]
+        else:
+            after = [frame for frame in frames if frame > current]
+            target = after[0] if after else frames[0]
+
+        self._state["frame_idx"] = max(0, min(target, self._total_frames - 1))
+        return True
 
     def set_reaches(self, reaches: Iterable) -> None:
         """Update reach-segment bars shown in the zoomed timeline.
@@ -239,6 +291,7 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._update_ticks()
         self._update_event_items()
         self._update_reach_bars()
+        self._update_reach_edit_preview()
 
     def _update_axis(self) -> None:
         w = max(self.width(), 1)
@@ -370,6 +423,75 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
             vline.setZValue(9)
             self._reach_items.append(vline)
 
+    def _update_reach_edit_preview(self) -> None:
+        """Show the in-progress reach curation stage and candidate frames."""
+        scene = self._scene
+        for item in self._reach_edit_items:
+            scene.removeItem(item)
+        self._reach_edit_items = []
+
+        if not self._reach_edit_active:
+            self._edit_lbl.hide()
+            return
+
+        stage_text = {
+            "select": "Select reach",
+            "start": "Set start",
+            "max": "Set max",
+            "end": "Set end",
+        }.get(self._reach_edit_stage, "")
+        self._edit_lbl.setText(stage_text)
+        self._edit_lbl.setPos(4, _REACH_Y + _REACH_H + 3)
+        self._edit_lbl.show()
+
+        frames = dict(self._reach_edit_frames)
+        if self._reach_edit_stage in {"start", "max", "end"}:
+            frames[self._reach_edit_stage] = self._curr_frame
+        if not frames:
+            return
+
+        start = frames.get("start")
+        max_frame = frames.get("max")
+        end = frames.get("end")
+
+        if start is not None and end is not None:
+            x0 = self._frame_to_x(start)
+            x1 = self._frame_to_x(end)
+            left = min(x0, x1)
+            width = max(abs(x1 - x0), 2.0)
+            pen = QPen(_EDIT_COLOR, 1.2)
+            pen.setCosmetic(True)
+            rect = scene.addRect(
+                QRectF(left, _REACH_Y - 2, width, _REACH_H + 4),
+                pen,
+                QBrush(_EDIT_PREVIEW_COLOR),
+            )
+            rect.setZValue(20)
+            self._reach_edit_items.append(rect)
+
+        line_defs = [
+            ("S", start, QColor(250, 204, 21)),
+            ("M", max_frame, QColor(255, 255, 255)),
+            ("E", end, QColor(248, 113, 113)),
+        ]
+        for label, frame, color in line_defs:
+            if frame is None:
+                continue
+            x = self._frame_to_x(frame)
+            pen = QPen(color, 2)
+            pen.setCosmetic(True)
+            line = scene.addLine(
+                QLineF(x, _REACH_Y - _REACH_EXTRA - 2, x, _LABEL_Y - 1),
+                pen,
+            )
+            line.setZValue(21)
+            self._reach_edit_items.append(line)
+            text = scene.addSimpleText(label)
+            text.setBrush(QBrush(color))
+            text.setPos(x + 2, _REACH_Y - _REACH_EXTRA - 8)
+            text.setZValue(22)
+            self._reach_edit_items.append(text)
+
     def _update_event_items(self) -> None:
         """Rebuild event-marker triangles for the visible window."""
         scene = self._scene
@@ -401,12 +523,16 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
 
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
+            if self._reach_edit_active:
+                self._handle_reach_edit_click(event)
+                return
             frame = self._x_to_frame(event.pos().x())
             frame = max(0, min(frame, self._total_frames - 1))
             self._state["frame_idx"] = frame
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
+        self.setFocus(Qt.MouseFocusReason)
         x = float(event.pos().x())
         frame = self._x_to_frame(x)
         frame = max(0, min(frame, self._total_frames - 1))
@@ -423,15 +549,145 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
 
         super().mouseMoveEvent(event)
 
+    def enterEvent(self, event) -> None:
+        self._is_hovering = True
+        self.setFocus(Qt.MouseFocusReason)
+        super().enterEvent(event)
+
     def leaveEvent(self, event) -> None:
+        self._is_hovering = False
         self._cursor_line.hide()
         self._cursor_lbl.hide()
         super().leaveEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_R and self._is_hovering:
+            self._start_reach_edit()
+            event.accept()
+            return
+
+        if self._reach_edit_active:
+            if event.key() == Qt.Key.Key_Escape:
+                self._cancel_reach_edit()
+                event.accept()
+                return
+            if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
+                step = -1 if event.key() == Qt.Key.Key_Left else 1
+                frame = max(0, min(self._curr_frame + step, self._total_frames - 1))
+                self._state["frame_idx"] = frame
+                event.accept()
+                return
+
+        super().keyPressEvent(event)
 
     def resizeEvent(self, event=None) -> None:
         if event:
             super().resizeEvent(event)
         self._full_redraw()
+
+    def _start_reach_edit(self) -> None:
+        self._reach_edit_active = True
+        self._reach_edit_stage = "select"
+        self._reach_edit_index = -1
+        self._reach_edit_frames = {}
+        self.setCursor(Qt.CrossCursor)
+        self._update_reach_edit_preview()
+
+    def _cancel_reach_edit(self) -> None:
+        self._reach_edit_active = False
+        self._reach_edit_stage = ""
+        self._reach_edit_index = -1
+        self._reach_edit_frames = {}
+        self.unsetCursor()
+        self._update_reach_edit_preview()
+
+    def _handle_reach_edit_click(self, event) -> None:
+        if self._reach_edit_stage == "select":
+            idx = self._reach_index_at(float(event.pos().x()), float(event.pos().y()))
+            if idx >= 0:
+                reach = self._reaches[idx]
+                self._reach_edit_index = idx
+                self._reach_edit_frames = {
+                    "start": int(reach.frame),
+                    "max": int(reach.max_frame),
+                    "end": int(reach.end_frame),
+                }
+                self._state["frame_idx"] = int(reach.frame)
+            else:
+                frame = self._x_to_frame(event.pos().x())
+                frame = max(0, min(frame, self._total_frames - 1))
+                self._reach_edit_index = -1
+                self._reach_edit_frames = self._initial_new_reach_frames(frame)
+                self._state["frame_idx"] = frame
+            self._reach_edit_stage = "start"
+            self._update_reach_edit_preview()
+            event.accept()
+            return
+
+        if self._reach_edit_stage == "start":
+            self._reach_edit_frames["start"] = int(self._curr_frame)
+            self._reach_edit_stage = "max"
+            self._state["frame_idx"] = self._reachable_frame(
+                self._reach_edit_frames.get("max", self._curr_frame)
+            )
+        elif self._reach_edit_stage == "max":
+            self._reach_edit_frames["max"] = int(self._curr_frame)
+            self._reach_edit_stage = "end"
+            self._state["frame_idx"] = self._reachable_frame(
+                self._reach_edit_frames.get("end", self._curr_frame)
+            )
+        elif self._reach_edit_stage == "end":
+            self._reach_edit_frames["end"] = int(self._curr_frame)
+            frames = self._normalized_reach_edit_frames(self._reach_edit_frames)
+            self.reachEditRequested.emit(
+                int(self._reach_edit_index),
+                frames["start"],
+                frames["max"],
+                frames["end"],
+            )
+            self._cancel_reach_edit()
+        self._update_reach_edit_preview()
+        event.accept()
+
+    def _reach_index_at(self, x: float, y: float) -> int:
+        if y < _REACH_Y - 3 or y > _REACH_Y + _REACH_H + 3:
+            return -1
+        frame = self._x_to_frame(x)
+        for idx, reach in enumerate(self._reaches):
+            if int(reach.frame) <= frame <= int(reach.end_frame):
+                return idx
+        return -1
+
+    def _initial_new_reach_frames(self, frame: int) -> Dict[str, int]:
+        last = max(0, self._total_frames - 1)
+        start = max(0, min(int(frame), last))
+        max_frame = max(start + 1, start)
+        end = max(start + 3, max_frame + 1)
+        if end > last:
+            end = last
+            max_frame = max(0, min(max_frame, end - 1))
+            start = max(0, min(start, max_frame - 1, end - 3))
+        return {"start": start, "max": max_frame, "end": end}
+
+    def _reachable_frame(self, frame: int) -> int:
+        return max(0, min(int(frame), self._total_frames - 1))
+
+    def _normalized_reach_edit_frames(self, frames: Dict[str, int]) -> Dict[str, int]:
+        last = max(0, self._total_frames - 1)
+        start = self._reachable_frame(frames.get("start", self._curr_frame))
+        max_frame = self._reachable_frame(frames.get("max", start + 1))
+        end = self._reachable_frame(frames.get("end", max_frame + 1))
+
+        max_frame = max(max_frame, start + 1)
+        end = max(end, max_frame + 1, start + 3)
+        if end > last:
+            end = last
+            max_frame = min(max_frame, end - 1)
+            start = min(start, max_frame - 1, end - 3)
+        start = max(0, start)
+        max_frame = max(start + 1, min(max_frame, last))
+        end = max(max_frame + 1, min(end, last))
+        return {"start": int(start), "max": int(max_frame), "end": int(end)}
 
 
 # ─────────────────────────────── module helpers ───────────────────────────── #

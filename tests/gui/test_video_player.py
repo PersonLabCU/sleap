@@ -96,6 +96,44 @@ def test_gui_video(qtbot):
     assert vp.close()
 
 
+def test_timeline_header_event_controls_navigate(qtbot):
+    state = GuiState()
+    state["frame_idx"] = 0
+    vp = QtVideoPlayer(state=state)
+    qtbot.addWidget(vp)
+
+    vp.zoomed_timeline.set_total_frames(50)
+    vp.zoomed_timeline.set_events(
+        [
+            {"event": "delivery", "frame": 3, "color": (255, 0, 0)},
+            {"event": "reach", "frame": 5, "color": (0, 255, 0)},
+            {"event": "reach", "frame": 20, "color": (0, 255, 0)},
+        ]
+    )
+
+    assert vp._tl_event_combo.isEnabled()
+    assert vp._tl_event_combo.findText("delivery") >= 0
+    assert vp._tl_event_combo.findText("reach") >= 0
+
+    vp._tl_event_combo.setCurrentText("reach")
+    vp._jump_timeline_event(1)
+    assert state["frame_idx"] == 5
+
+    vp._jump_timeline_event(1)
+    assert state["frame_idx"] == 20
+
+    vp._jump_timeline_event(-1)
+    assert state["frame_idx"] == 5
+
+    vp.zoomed_timeline.set_events([])
+    assert not vp._tl_event_combo.isEnabled()
+    assert not vp._tl_prev_event_btn.isEnabled()
+    assert not vp._tl_next_event_btn.isEnabled()
+
+    vp.cleanup()
+    assert vp.close()
+
+
 def test_inner_bounding_box_drag_requires_shift(qtbot, centered_pair_labels):
     vp = QtVideoPlayer(centered_pair_labels.video)
     qtbot.addWidget(vp)
