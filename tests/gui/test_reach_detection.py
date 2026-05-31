@@ -493,6 +493,40 @@ def test_reaches_dock_filter_hand_trajectories_preserves_nan(qtbot):
     assert dock._filter_sampling_label.text() == "150 Hz"
 
 
+def test_reaches_dock_builds_parameter_traces():
+    dock = ReachesDock.__new__(ReachesDock)
+    right_hand = np.array(
+        [
+            [3.0, 4.0, 0.0],
+            [6.0, 8.0, 0.0],
+            [9.0, 12.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    pellet = np.zeros((3, 3), dtype=np.float64)
+    rh_conf = np.array([1.0, 0.2, 1.0], dtype=np.float64)
+    pellet_conf = np.ones(3, dtype=np.float64)
+
+    traces = dock._make_reach_parameter_traces(
+        right_hand=right_hand,
+        pellet=pellet,
+        right_hand_confidence=rh_conf,
+        pellet_confidence=pellet_conf,
+        pellet_nodes=["pellet"],
+        confidence=0.5,
+    )
+
+    assert [trace["name"] for trace in traces] == ["RH pellet dist", "RH x"]
+    assert traces[0]["color"] == "#a3e635"
+    assert traces[1]["color"] == "#34d399"
+    np.testing.assert_allclose(
+        traces[0]["values"], [5.0, np.nan, 15.0], equal_nan=True
+    )
+    np.testing.assert_allclose(
+        traces[1]["values"], [3.0, np.nan, 9.0], equal_nan=True
+    )
+
+
 def test_translate_points3d_h5_uses_selected_node_as_frame_origin(tmp_path):
     src = tmp_path / "points3D.h5"
     points = np.array(

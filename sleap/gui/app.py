@@ -1183,6 +1183,9 @@ class MainWindow(QMainWindow):
         self.reaches_dock.on_reaches_changed = (
             self.player.zoomed_timeline.set_reaches
         )
+        self.reaches_dock.on_reach_traces_changed = (
+            self.player.reach_trace_plot.set_traces
+        )
         self.player.zoomed_timeline.reachEditRequested.connect(
             self.reaches_dock.upsert_reach
         )
@@ -1190,6 +1193,9 @@ class MainWindow(QMainWindow):
         self.state.connect(
             "video",
             lambda _: (
+                self.player.reach_trace_plot.clear_traces()
+                if hasattr(self.player, "reach_trace_plot")
+                else None,
                 self.reaches_dock._delete_all()
                 if hasattr(self, "reaches_dock")
                 else None

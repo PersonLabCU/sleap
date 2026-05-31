@@ -134,6 +134,43 @@ def test_timeline_header_event_controls_navigate(qtbot):
     assert vp.close()
 
 
+def test_reach_trace_plot_matches_timeline_span_and_frame():
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    assert app is not None
+    state = GuiState()
+    state["frame_idx"] = 0
+    vp = QtVideoPlayer(state=state)
+    try:
+        vp.reach_trace_plot.set_total_frames(20)
+        vp.reach_trace_plot.set_traces(
+            [
+                {
+                    "name": "RH x",
+                    "values": np.arange(20, dtype=np.float64),
+                    "color": "#34d399",
+                }
+            ]
+        )
+
+        vp._set_timeline_span(50)
+        assert vp.reach_trace_plot._span == 50
+        assert vp.zoomed_timeline._span == 50
+
+        state["frame_idx"] = 7
+        assert vp.reach_trace_plot._curr_frame == 7
+        assert vp.zoomed_timeline._curr_frame == 7
+        assert "RH x: 7.00" in vp.reach_trace_plot._value_label.text()
+        label_items = [
+            item
+            for item in vp.reach_trace_plot._trace_items
+            if isinstance(item, QtWidgets.QGraphicsSimpleTextItem)
+        ]
+        assert label_items[-1].brush().color().name() == "#34d399"
+    finally:
+        vp.cleanup()
+        assert vp.close()
+
+
 def test_inner_bounding_box_drag_requires_shift(qtbot, centered_pair_labels):
     vp = QtVideoPlayer(centered_pair_labels.video)
     qtbot.addWidget(vp)

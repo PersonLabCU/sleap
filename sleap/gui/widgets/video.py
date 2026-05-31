@@ -59,7 +59,10 @@ from sleap.gui.color import ColorManager
 from sleap.gui.shortcuts import Shortcuts
 from sleap.gui.state import GuiState
 from sleap.gui.widgets.slider import VideoSlider
-from sleap.gui.widgets.zoomed_timeline import ZoomedTimelineWidget
+from sleap.gui.widgets.zoomed_timeline import (
+    ReachParameterTraceWidget,
+    ZoomedTimelineWidget,
+)
 from sleap_io.model.instance import Instance, PredictedInstance
 from sleap.sleap_io_adaptors.instance_utils import fill_missing, node_points
 from sleap.sleap_io_adaptors.lf_labels_utils import get_instances_to_show
@@ -287,6 +290,7 @@ class QtVideoPlayer(QWidget):
         self.seekbar.heightUpdated.connect(lambda: self.splitter.refresh())
 
         # ── Zoomed local timeline panel ──────────────────────────────────── #
+        self.reach_trace_plot = ReachParameterTraceWidget(self.state)
         self.zoomed_timeline = ZoomedTimelineWidget(self.state)
 
         # Control strip above the zoomed timeline
@@ -294,6 +298,9 @@ class QtVideoPlayer(QWidget):
         _tl_header.setObjectName("zoomedTimelineHeader")
         _tl_header.setStyleSheet(
             "QWidget#zoomedTimelineHeader { background: #16181f; }"
+        )
+        _tl_header.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed
         )
         _tl_header_layout = QtWidgets.QHBoxLayout(_tl_header)
         _tl_header_layout.setContentsMargins(6, 2, 6, 2)
@@ -361,9 +368,7 @@ class QtVideoPlayer(QWidget):
         )
         self._tl_span_combo.setCurrentIndex(default_idx)
         self._tl_span_combo.currentIndexChanged.connect(
-            lambda _: self.zoomed_timeline.set_span(
-                self._tl_span_combo.currentData()
-            )
+            lambda _: self._set_timeline_span(self._tl_span_combo.currentData())
         )
         _tl_header_layout.addWidget(self._tl_span_combo)
         self.zoomed_timeline.eventNamesChanged.connect(
@@ -377,8 +382,9 @@ class QtVideoPlayer(QWidget):
         _panel_layout = QtWidgets.QVBoxLayout(self.zoomed_timeline_panel)
         _panel_layout.setContentsMargins(0, 0, 0, 0)
         _panel_layout.setSpacing(0)
-        _panel_layout.addWidget(_tl_header)
-        _panel_layout.addWidget(self.zoomed_timeline)
+        _panel_layout.addWidget(_tl_header, 0)
+        _panel_layout.addWidget(self.reach_trace_plot, 1)
+        _panel_layout.addWidget(self.zoomed_timeline, 0)
 
         self.splitter.addWidget(self.zoomed_timeline_panel)
         # ──────────────────────────────────────────────────────────────────── #
@@ -459,6 +465,11 @@ class QtVideoPlayer(QWidget):
             self._tl_prev_event_btn.setEnabled(False)
             self._tl_next_event_btn.setEnabled(False)
         self._tl_event_combo.blockSignals(False)
+
+    def _set_timeline_span(self, span: int) -> None:
+        """Apply the same visible frame window to the trace plot and timeline."""
+        self.reach_trace_plot.set_span(span)
+        self.zoomed_timeline.set_span(span)
 
     def _jump_timeline_event(self, direction: int) -> None:
         """Navigate to the previous or next selected session event."""
@@ -1054,6 +1065,7 @@ class QtVideoPlayer(QWidget):
             self.seekbar.setMaximum(last_frame_idx)
             self.seekbar.setEnabled(True)
             self.seekbar.resizeEvent()
+            self.reach_trace_plot.set_total_frames(last_frame_idx + 1)
             self.zoomed_timeline.set_total_frames(last_frame_idx + 1)
             if (
                 self.state["frame_idx"] is None
@@ -1088,6 +1100,8 @@ class QtVideoPlayer(QWidget):
         # Reset seekbar
         self.seekbar.setMaximum(0)
         self.seekbar.setEnabled(False)
+        self.reach_trace_plot.set_total_frames(1)
+        self.reach_trace_plot.clear_traces()
 
     @property
     def instances(self):

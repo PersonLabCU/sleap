@@ -11,6 +11,7 @@ QGraphicsView/QGraphicsScene infrastructure (no extra dependencies required).
 from bisect import bisect_left, bisect_right
 from typing import Dict, Iterable, List, Optional
 
+import numpy as np
 from qtpy import QtCore, QtWidgets
 from qtpy.QtCore import Qt, QLineF, QPointF, QRectF
 from qtpy.QtGui import (
@@ -75,6 +76,213 @@ _CF_COLOR = QColor(255, 255, 255)
 _CURSOR_COLOR = QColor(200, 205, 220, 170)
 _EDIT_COLOR = QColor(250, 204, 21)
 _EDIT_PREVIEW_COLOR = QColor(250, 204, 21, 95)
+
+_TRACE_H = 58
+_TRACE_PAD_TOP = 6
+_TRACE_PAD_BOTTOM = 16
+_TRACE_LABEL_COLOR = QColor(170, 176, 196)
+_TRACE_GRID_COLOR = QColor(55, 60, 76)
+
+
+class ReachParameterTraceWidget(QtWidgets.QGraphicsView):
+    """Small frame-synchronized plot for reach detector parameter traces."""
+
+    def __init__(self, state: GuiState):
+        super().__init__()
+        self._state = state
+        self._curr_frame: int = 0
+        self._total_frames: int = 1
+        self._span: int = ZoomedTimelineWidget.DEFAULT_SPAN
+        self._traces: List[dict] = []
+
+        self._scene = QtWidgets.QGraphicsScene()
+        self.setScene(self._scene)
+        self.setAlignment(Qt.AlignLeft | Qt.AlignTop)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.setMinimumHeight(_TRACE_H + 2)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
+        from qtpy.QtGui import QPainter
+        self.setRenderHint(QPainter.Antialiasing, True)
+        self._scene.setBackgroundBrush(QBrush(_BG_COLOR))
+        self._scene.setSceneRect(QRectF(0, 0, 400, _TRACE_H))
+
+        current_pen = QPen(_CF_COLOR, 1)
+        current_pen.setCosmetic(True)
+        self._current_line = self._scene.addLine(
+            QLineF(0, 0, 0, _TRACE_H), current_pen
+        )
+        self._current_line.setZValue(10)
+
+        self._label_font = QFont()
+        self._label_font.setPixelSize(9)
+        self._value_label = self._scene.addSimpleText("", self._label_font)
+        self._value_label.setBrush(QBrush(_TRACE_LABEL_COLOR))
+        self._value_label.setZValue(12)
+        self._value_label.hide()
+
+        self._trace_items: List = []
+        state.connect("frame_idx", self._on_frame_changed)
+        self._redraw()
+
+    def set_total_frames(self, n: int) -> None:
+        """Notify widget of the total number of frames in the current video."""
+        self._total_frames = max(1, int(n))
+        self._redraw()
+
+    def set_span(self, span: int) -> None:
+        """Change the visible half-window to match the zoomed timeline."""
+        self._span = max(1, int(span))
+        self._redraw()
+
+    def clear_traces(self) -> None:
+        """Clear all detector parameter traces."""
+        self.set_traces([])
+
+    def set_traces(self, traces: Optional[Iterable[dict]]) -> None:
+        """Set detector traces.
+
+        Each trace dict should include ``name``, ``values`` and ``color``.
+        Values are plotted over frame index and scaled independently within the
+        visible window so pellet-distance and absolute-coordinate traces can be
+        viewed together.
+        """
+        normalized = []
+        for trace in traces or []:
+            values = np.asarray(trace.get("values", []), dtype=np.float64).reshape(-1)
+            if values.size == 0:
+                continue
+            normalized.append(
+                {
+                    "name": str(trace.get("name", "Trace")),
+                    "values": values,
+                    "color": str(trace.get("color", "#38bdf8")),
+                }
+            )
+        self._traces = normalized
+        self._redraw()
+
+    def _frame_to_x(self, frame: float) -> float:
+        w = max(self.width(), 1)
+        return (frame - (self._curr_frame - self._span)) / (2 * self._span) * w
+
+    def _plot_height(self) -> int:
+        return max(self.viewport().height(), _TRACE_H)
+
+    def _value_to_y(self, value: float, vmin: float, vmax: float) -> float:
+        h = self._plot_height()
+        top = _TRACE_PAD_TOP
+        bottom = h - _TRACE_PAD_BOTTOM
+        if not np.isfinite(value):
+            return bottom
+        if not np.isfinite(vmin) or not np.isfinite(vmax) or vmax <= vmin:
+            return (top + bottom) / 2.0
+        frac = (float(value) - vmin) / (vmax - vmin)
+        return bottom - frac * (bottom - top)
+
+    def _visible_bounds(self, values: np.ndarray, start: int, end: int) -> tuple:
+        visible = values[max(0, start) : min(values.size, end + 1)]
+        visible = visible[np.isfinite(visible)]
+        if visible.size == 0:
+            return float("nan"), float("nan")
+        vmin = float(np.nanmin(visible))
+        vmax = float(np.nanmax(visible))
+        if vmin == vmax:
+            pad = max(abs(vmin) * 0.05, 1.0)
+            vmin -= pad
+            vmax += pad
+        return vmin, vmax
+
+    def _redraw(self) -> None:
+        scene = self._scene
+        w = max(self.width(), 1)
+        h = self._plot_height()
+        scene.setSceneRect(QRectF(0, 0, w, h))
+
+        for item in self._trace_items:
+            scene.removeItem(item)
+        self._trace_items = []
+
+        baseline_pen = QPen(_TRACE_GRID_COLOR, 1)
+        baseline_pen.setCosmetic(True)
+        baseline = scene.addLine(
+            QLineF(0, h - _TRACE_PAD_BOTTOM, w, h - _TRACE_PAD_BOTTOM),
+            baseline_pen,
+        )
+        baseline.setZValue(1)
+        self._trace_items.append(baseline)
+
+        win_start = int(max(0, self._curr_frame - self._span))
+        win_end = int(min(self._total_frames - 1, self._curr_frame + self._span))
+        label_entries = []
+
+        for trace in self._traces:
+            values = trace["values"]
+            if win_start >= values.size:
+                continue
+            vmin, vmax = self._visible_bounds(values, win_start, win_end)
+            if not np.isfinite(vmin) or not np.isfinite(vmax):
+                continue
+
+            path = QPainterPath()
+            drawing = False
+            last = min(win_end, values.size - 1)
+            for frame in range(win_start, last + 1):
+                value = values[frame]
+                if not np.isfinite(value):
+                    drawing = False
+                    continue
+                x = self._frame_to_x(frame)
+                y = self._value_to_y(value, vmin, vmax)
+                if not drawing:
+                    path.moveTo(x, y)
+                    drawing = True
+                else:
+                    path.lineTo(x, y)
+
+            color = QColor(trace["color"])
+            pen = QPen(color, 1.6)
+            pen.setCosmetic(True)
+            item = scene.addPath(path, pen)
+            item.setZValue(4)
+            self._trace_items.append(item)
+
+            label = trace["name"]
+            if (
+                0 <= self._curr_frame < values.size
+                and np.isfinite(values[self._curr_frame])
+            ):
+                label = f"{label}: {float(values[self._curr_frame]):.2f}"
+            label_entries.append((label, color))
+
+        cx = self._frame_to_x(self._curr_frame)
+        self._current_line.setLine(QLineF(cx, 0, cx, h))
+
+        label_parts = [text for text, _ in label_entries]
+        self._value_label.setText("   ".join(label_parts))
+        self._value_label.hide()
+
+        label_x = 4.0
+        label_y = h - 14
+        for text, color in label_entries:
+            label_item = scene.addSimpleText(text, self._label_font)
+            label_item.setBrush(QBrush(color))
+            label_item.setPos(label_x, label_y)
+            label_item.setZValue(12)
+            self._trace_items.append(label_item)
+            label_x += label_item.boundingRect().width() + 12.0
+
+    def _on_frame_changed(self, frame_idx) -> None:
+        self._curr_frame = int(frame_idx or 0)
+        self._redraw()
+
+    def resizeEvent(self, event=None) -> None:
+        if event:
+            super().resizeEvent(event)
+        self._redraw()
 
 
 class ZoomedTimelineWidget(QtWidgets.QGraphicsView):

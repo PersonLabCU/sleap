@@ -959,6 +959,7 @@ class ReachesDock(DockWidget):
         self._pellet_traj2d = None        # (n_frames, 2) float64 or None
         self._pred_source_video_stem: Optional[str] = None
         self.on_reaches_changed: Optional[Callable] = None
+        self.on_reach_traces_changed: Optional[Callable] = None
         super().__init__(
             name="Reaches",
             main_window=main_window,
@@ -1499,6 +1500,7 @@ class ReachesDock(DockWidget):
         self._pred_cam_combo.setEnabled(False)
         self._pred_status_label.setStyleSheet("color: #777; font-size: 10px;")
         self._pred_status_label.setText("Source: project labels")
+        self._notify_reach_traces_changed([])
         self._refresh_nodes()
 
     # ── detection parameters ─────────────────────────────────────────────── #
@@ -1564,13 +1566,13 @@ class ReachesDock(DockWidget):
 
         self._min_thresh = QDoubleSpinBox()
         self._min_thresh.setRange(-10000, 10000)
-        self._min_thresh.setValue(-30.0)
+        self._min_thresh.setValue(-10.0)
         self._min_thresh.setSingleStep(1.0)
         form_layout.addRow("KPN outward threshold:", self._min_thresh)
 
         self._max_thresh = QDoubleSpinBox()
         self._max_thresh.setRange(-10000, 10000)
-        self._max_thresh.setValue(-26.0)
+        self._max_thresh.setValue(-7.0)
         self._max_thresh.setSingleStep(1.0)
         form_layout.addRow("KPN max threshold:", self._max_thresh)
 
@@ -1593,7 +1595,7 @@ class ReachesDock(DockWidget):
 
         self._max_frames = QSpinBox()
         self._max_frames.setRange(1, 10000)
-        self._max_frames.setValue(100)
+        self._max_frames.setValue(200)
         form_layout.addRow("Max duration (frames):", self._max_frames)
 
         self._start_padding = QSpinBox()
@@ -2016,6 +2018,7 @@ class ReachesDock(DockWidget):
         from sleap.gui.reach_projection import extract_reprojection_position
         from qtpy.QtWidgets import QApplication
 
+        self._notify_reach_traces_changed([])
         lh_nodes = self._selected_lh_nodes()
         rh_nodes = self._selected_rh_nodes()
         if not lh_nodes or not rh_nodes:
@@ -2130,6 +2133,17 @@ class ReachesDock(DockWidget):
         except ValueError as exc:
             self._status_label.setText(str(exc))
             return
+
+        self._notify_reach_traces_changed(
+            self._make_reach_parameter_traces(
+                right_hand=rh_traj,
+                pellet=pellet_traj,
+                right_hand_confidence=rh_conf,
+                pellet_confidence=pellet_conf,
+                pellet_nodes=pellet_nodes,
+                confidence=point_confidence,
+            )
+        )
 
         dims_to_check = 3 if points3d_source is not None else 2
         lh_valid = (
@@ -2504,9 +2518,82 @@ class ReachesDock(DockWidget):
             out[:take] = np.isfinite(conf[:take]) & (conf[:take] >= threshold)
         return out
 
+    def _make_reach_parameter_traces(
+        self,
+        *,
+        right_hand,
+        pellet,
+        right_hand_confidence,
+        pellet_confidence,
+        pellet_nodes: List[str],
+        confidence: float,
+    ) -> List[dict]:
+        """Build timeline-aligned traces used for reach-parameter tuning."""
+        import numpy as np
+
+        traces: List[dict] = []
+        rh = np.asarray(right_hand, dtype=np.float64)
+        if rh.ndim != 2 or rh.size == 0:
+            return traces
+
+        n = rh.shape[0]
+        rh_ok = self._confidence_ok(right_hand_confidence, n, confidence)
+        rh_x = np.full(n, np.nan, dtype=np.float64)
+        if rh.shape[1] >= 1:
+            rh_x[:] = rh[:, 0]
+            rh_x[~rh_ok] = np.nan
+            traces.append(
+                {
+                    "name": "RH x",
+                    "values": rh_x,
+                    "color": "#34d399",
+                }
+            )
+
+        pellet_arr = np.asarray(pellet, dtype=np.float64)
+        if not pellet_nodes or pellet_arr.ndim != 2 or pellet_arr.size == 0:
+            return traces
+
+        n = min(n, pellet_arr.shape[0])
+        if n <= 0:
+            return traces
+        rh_xyz = np.full((n, 3), np.nan, dtype=np.float64)
+        pellet_xyz = np.full((n, 3), np.nan, dtype=np.float64)
+        rh_cols = min(3, rh.shape[1])
+        pellet_cols = min(3, pellet_arr.shape[1])
+        rh_xyz[:, :rh_cols] = rh[:n, :rh_cols]
+        pellet_xyz[:, :pellet_cols] = pellet_arr[:n, :pellet_cols]
+        if rh_cols == 2:
+            rh_xyz[:, 2] = 0.0
+        if pellet_cols == 2:
+            pellet_xyz[:, 2] = 0.0
+
+        pellet_ok = self._confidence_ok(pellet_confidence, n, confidence)
+        pellet_ok &= np.all(np.isfinite(pellet_xyz), axis=1)
+        if not np.any(pellet_ok):
+            return traces
+
+        pellet_home = np.nanmedian(pellet_xyz[pellet_ok], axis=0)
+        distance = np.sqrt(np.sum((rh_xyz - pellet_home) ** 2, axis=1))
+        distance[~rh_ok[:n]] = np.nan
+        distance[~np.all(np.isfinite(rh_xyz), axis=1)] = np.nan
+        traces.insert(
+            0,
+            {
+                "name": "RH pellet dist",
+                "values": distance,
+                "color": "#a3e635",
+            },
+        )
+        return traces
+
     def _notify_reaches_changed(self) -> None:
         if callable(self.on_reaches_changed):
             self.on_reaches_changed(self._reaches)
+
+    def _notify_reach_traces_changed(self, traces: Optional[List[dict]]) -> None:
+        if callable(self.on_reach_traces_changed):
+            self.on_reach_traces_changed(traces or [])
 
     def _update_frame_markers(self) -> None:
         """Push the current-frame LH/RH/pellet (x,y) positions into the view."""
