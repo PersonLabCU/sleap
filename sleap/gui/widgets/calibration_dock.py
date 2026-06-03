@@ -1,10 +1,10 @@
 """Dockable widget for multi-camera calibration using sleap-anipose."""
 
 import logging
+import tomllib
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import toml
 from qtpy import QtCore
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
@@ -578,7 +578,8 @@ class CalibrationDock(DockWidget):
     def _load_charuco_toml(self, path: str) -> None:
         """Read charuco.toml and populate the board parameter fields."""
         try:
-            data = toml.load(path)
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
             if "board_x" in data:
                 self._board_x_spin.setValue(int(data["board_x"]))
             if "board_y" in data:

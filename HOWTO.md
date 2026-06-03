@@ -11,6 +11,7 @@ the `sleap` command uses the code in your local checkout.
 Install these first if you do not already have them:
 
 - Git: <https://git-scm.com/downloads>
+- uv: <https://docs.astral.sh/uv/getting-started/installation/>
 - Miniforge, Miniconda, or Anaconda
 - Access to the private `PersonLabCU/sleap` GitHub repository
 
@@ -22,6 +23,28 @@ Check that the tools are available:
 ```bash
 git --version
 conda --version
+```
+
+## 1a. Install uv (if needed)
+
+If `uv --version` fails, install `uv` first.
+
+On Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+On macOS/Linux:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Then close and reopen your terminal and verify:
+
+```bash
+uv --version
 ```
 
 ## 2. Clone the repository
@@ -53,8 +76,11 @@ conda activate personlab-sleap
 Upgrade the Python build tools in the new environment:
 
 ```bash
-python -m pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade pip setuptools==81.0.0 wheel
 ```
+
+`setuptools` is pinned to `81.0.0` because current `torch` wheels used by this
+project require `setuptools<82`.
 
 ## 4. Install the project and dependencies
 
@@ -63,12 +89,27 @@ Pick **one** of the install commands below.
 ### Option A: NVIDIA GPU, recommended for training
 
 Use this on Windows or Linux workstations with an NVIDIA GPU. The PyTorch CUDA
-wheels include the CUDA runtime libraries needed by PyTorch; you do not need to
-install CUDA with conda for this environment.
+wheels include the CUDA runtime libraries needed by PyTorch. You do not need to
+install CUDA with conda for this environment, and your system CUDA toolkit is
+not used by these PyTorch wheels.
 
 ```bash
 python -m pip install -e ".[nn,anipose,jupyter]" --extra-index-url https://download.pytorch.org/whl/cu128
 ```
+
+By default, use `cu128` (CUDA 12.8). If needed for a different machine, you can
+switch backends by changing the extra index URL:
+
+```bash
+# NVIDIA GPU, CUDA 11.8 wheels
+python -m pip install -e ".[nn,anipose,jupyter]" --extra-index-url https://download.pytorch.org/whl/cu118
+
+# NVIDIA GPU, CUDA 13.0 wheels
+python -m pip install -e ".[nn,anipose,jupyter]" --extra-index-url https://download.pytorch.org/whl/cu130
+```
+
+Choose the backend based on your NVIDIA driver compatibility on that machine
+(not on whether a local CUDA toolkit is already installed).
 
 ### Option B: CPU only
 
@@ -78,6 +119,39 @@ GUI, labeling, proofreading, and lightweight testing.
 ```bash
 python -m pip install -e ".[nn,anipose,jupyter]" --extra-index-url https://download.pytorch.org/whl/cpu
 ```
+
+### Option C: Isolated uv project environment (safe side-by-side install)
+
+Use this if users already have another SLEAP installation on their machine and
+you want this repository to stay fully isolated. This creates a repo-local
+`.venv` and does not replace the globally installed `sleap` tool.
+
+```bash
+# NVIDIA GPU (CUDA 12.8 default in this repo)
+uv sync --extra nn --extra anipose --extra jupyter
+
+# CPU-only
+uv sync --extra nn-cpu --extra anipose --extra jupyter
+```
+
+For NVIDIA GPUs, you can also choose:
+
+```bash
+# CUDA 11.8
+uv sync --extra nn-cuda118 --extra anipose --extra jupyter
+
+# CUDA 13.0
+uv sync --extra nn-cuda130 --extra anipose --extra jupyter
+```
+
+Run SLEAP from this isolated environment with:
+
+```bash
+uv run sleap
+```
+
+Avoid `uv tool install` for this fork if users also keep another `sleap` tool
+installed globally, since both use the same command name.
 
 These commands install:
 
@@ -131,6 +205,9 @@ conda activate personlab-sleap
 git pull
 python -m pip install -e ".[nn,anipose,jupyter]" --extra-index-url https://download.pytorch.org/whl/cu128
 ```
+
+If your machine needs a different NVIDIA backend, replace `cu128` with
+`cu118` or `cu130` in the index URL.
 
 For a CPU-only environment, use the CPU install command instead:
 
