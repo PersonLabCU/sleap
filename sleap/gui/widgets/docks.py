@@ -2021,10 +2021,13 @@ class ReachesDock(DockWidget):
         self._notify_reach_traces_changed([])
         lh_nodes = self._selected_lh_nodes()
         rh_nodes = self._selected_rh_nodes()
-        if not lh_nodes or not rh_nodes:
+        detection_method = self._detection_method()
+        if not rh_nodes:
+            self._status_label.setText("Check R_HAND nodes.")
+            return
+        if detection_method == "from_pellet" and not lh_nodes:
             self._status_label.setText("Check R_HAND and L_HAND nodes.")
             return
-        detection_method = self._detection_method()
 
         src_video = self.main_window.state.get("video", default=None)
         src_labels = self.main_window.labels
@@ -2077,8 +2080,12 @@ class ReachesDock(DockWidget):
             if detection_method == "from_pellet" and not pellet_nodes:
                 self._status_label.setText("No PELLET node found in the points3D file.")
                 return
-            lh_traj = extract_points3d_position(points3d, node_names, lh_nodes)
             rh_traj = extract_points3d_position(points3d, node_names, rh_nodes)
+            lh_traj = (
+                extract_points3d_position(points3d, node_names, lh_nodes)
+                if lh_nodes
+                else np.full_like(rh_traj, np.nan, dtype=np.float64)
+            )
             pellet_traj = (
                 extract_points3d_position(points3d, node_names, pellet_nodes)
                 if pellet_nodes
@@ -2089,8 +2096,12 @@ class ReachesDock(DockWidget):
                 if self._points3d_reprojections is not None
                 else None
             )
-            lh_conf = extract_reprojection_confidence(point_scores, node_names, lh_nodes)
             rh_conf = extract_reprojection_confidence(point_scores, node_names, rh_nodes)
+            lh_conf = (
+                extract_reprojection_confidence(point_scores, node_names, lh_nodes)
+                if lh_nodes
+                else None
+            )
             pellet_conf = (
                 extract_reprojection_confidence(point_scores, node_names, pellet_nodes)
                 if pellet_nodes
@@ -2098,18 +2109,22 @@ class ReachesDock(DockWidget):
             )
         else:
             # Extract fixed-camera trajectories from the predictions source.
-            lh_traj, lh_conf = extract_hand_position_3d_with_confidence(
-                src_labels,
-                src_video,
-                lh_nodes,
-                min_confidence=point_confidence,
-            )
             rh_traj, rh_conf = extract_hand_position_3d_with_confidence(
                 src_labels,
                 src_video,
                 rh_nodes,
                 min_confidence=point_confidence,
             )
+            if lh_nodes:
+                lh_traj, lh_conf = extract_hand_position_3d_with_confidence(
+                    src_labels,
+                    src_video,
+                    lh_nodes,
+                    min_confidence=point_confidence,
+                )
+            else:
+                lh_traj = np.full_like(rh_traj, np.nan, dtype=np.float64)
+                lh_conf = None
             pellet_nodes = suggest_pellet_nodes(self._skeleton_node_names())
             if detection_method == "from_pellet" and not pellet_nodes:
                 self._status_label.setText("No PELLET node found in the predictions skeleton.")
@@ -2168,10 +2183,11 @@ class ReachesDock(DockWidget):
             if pellet_traj.size else 0
         )
 
-        if lh_valid == 0 or rh_valid == 0 or (
-            detection_method == "from_pellet" and pellet_valid == 0
-        ):
-            required = "R_HAND, L_HAND, or PELLET" if detection_method == "from_pellet" else "R_HAND or L_HAND"
+        missing_required_data = rh_valid == 0 or (
+            detection_method == "from_pellet" and (lh_valid == 0 or pellet_valid == 0)
+        )
+        if missing_required_data:
+            required = "R_HAND, L_HAND, or PELLET" if detection_method == "from_pellet" else "R_HAND"
             self._status_label.setText(
                 f"Missing {required} data. "
                 "Check that the predictions file/camera matches the skeleton."

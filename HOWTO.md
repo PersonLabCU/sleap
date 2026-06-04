@@ -97,6 +97,10 @@ not used by these PyTorch wheels.
 python -m pip install -e ".[nn,anipose,jupyter]" --extra-index-url https://download.pytorch.org/whl/cu128
 ```
 
+```bash
+.\.venv\Scripts\python.exe -m pip install --force-reinstall --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cu128
+```
+
 By default, use `cu128` (CUDA 12.8). If needed for a different machine, you can
 switch backends by changing the extra index URL:
 
