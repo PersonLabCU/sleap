@@ -338,6 +338,12 @@ class Skeleton3DWidget(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel("")
         self.status_label.setWordWrap(True)
         layout.addWidget(self.status_label)
+        self.transform_note_label = QtWidgets.QLabel(
+            "Note: plotted y and z values are negated from the raw points3d.h5 import."
+        )
+        self.transform_note_label.setWordWrap(True)
+        self.transform_note_label.setStyleSheet("color: #666;")
+        layout.addWidget(self.transform_note_label)
 
     def load_from_dialog(self) -> None:
         """Open a file picker and load a points3D HDF5 file."""
