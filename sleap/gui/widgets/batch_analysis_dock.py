@@ -56,7 +56,7 @@ class BatchAnalysisWorker(QtCore.QThread):
     def __init__(
         self,
         *,
-        model_path: str,
+        model_paths: Sequence[str],
         calibration_path: str,
         parent_dir: str,
         batch_size: int,
@@ -66,7 +66,7 @@ class BatchAnalysisWorker(QtCore.QThread):
         parent=None,
     ):
         super().__init__(parent)
-        self._model_path = model_path
+        self._model_paths = list(model_paths)
         self._calibration_path = calibration_path
         self._parent_dir = parent_dir
         self._batch_size = batch_size
@@ -102,7 +102,8 @@ class BatchAnalysisWorker(QtCore.QThread):
             current_step = 0
 
             self.logOutput.emit(f"Parent directory: {self._parent_dir}")
-            self.logOutput.emit(f"Model: {self._model_path}")
+            for model_path in self._model_paths:
+                self.logOutput.emit(f"Model: {model_path}")
             if self._calibration_path:
                 self.logOutput.emit(f"Calibration: {self._calibration_path}")
             self.logOutput.emit(f"Found {len(sessions)} session folder(s).")
@@ -166,7 +167,7 @@ class BatchAnalysisWorker(QtCore.QThread):
         video = Video.from_filename(str(video_path))
         item = VideoItemForInference(video=video, frames=None, use_absolute_path=True)
         task = InferenceTask(
-            trained_job_paths=[self._model_path],
+            trained_job_paths=self._model_paths,
             inference_params={
                 "_batch_size": self._batch_size,
                 "_max_instances": self._max_instances,
@@ -339,6 +340,9 @@ class BatchAnalysisDock(DockWidget):
         model_row = QHBoxLayout()
         self._model_path_edit = QLineEdit()
         self._model_path_edit.setPlaceholderText("Path to trained model directory...")
+        self._model_path_edit.setToolTip(
+            "For top-down inference, select the centroid model here."
+        )
         self._model_path_edit.textChanged.connect(self._update_run_btn)
         model_btn = QPushButton("Browse")
         model_btn.setFixedWidth(70)
@@ -346,6 +350,22 @@ class BatchAnalysisDock(DockWidget):
         model_row.addWidget(self._model_path_edit)
         model_row.addWidget(model_btn)
         layout.addLayout(model_row)
+
+        top_down_model_row = QHBoxLayout()
+        self._centered_model_path_edit = QLineEdit()
+        self._centered_model_path_edit.setPlaceholderText(
+            "Optional centered-instance model directory..."
+        )
+        self._centered_model_path_edit.setToolTip(
+            "For top-down inference, select the centered-instance model here."
+        )
+        self._centered_model_path_edit.textChanged.connect(self._update_run_btn)
+        centered_model_btn = QPushButton("Browse")
+        centered_model_btn.setFixedWidth(70)
+        centered_model_btn.clicked.connect(self._browse_centered_model)
+        top_down_model_row.addWidget(self._centered_model_path_edit)
+        top_down_model_row.addWidget(centered_model_btn)
+        layout.addLayout(top_down_model_row)
 
         calibration_row = QHBoxLayout()
         self._calibration_path_edit = QLineEdit()
@@ -430,6 +450,21 @@ class BatchAnalysisDock(DockWidget):
         if path:
             self._model_path_edit.setText(path)
 
+    def _browse_centered_model(self) -> None:
+        path = FileDialog.openDir(
+            self,
+            caption="Select Centered-Instance Model Directory",
+        )
+        if path:
+            self._centered_model_path_edit.setText(path)
+
+    def _selected_model_paths(self) -> List[str]:
+        model_paths = [self._model_path_edit.text().strip()]
+        centered_model_path = self._centered_model_path_edit.text().strip()
+        if centered_model_path:
+            model_paths.append(centered_model_path)
+        return model_paths
+
     def _browse_calibration(self) -> None:
         path, _ = FileDialog.open(
             self,
@@ -485,15 +520,18 @@ class BatchAnalysisDock(DockWidget):
         self._run_btn.setEnabled(has_model and has_parent)
 
     def _run_batch_analysis(self) -> None:
-        model_path = self._model_path_edit.text().strip()
+        model_paths = self._selected_model_paths()
         calibration_path = self._calibration_path_edit.text().strip()
         parent_dir = self._parent_path_edit.text().strip()
 
-        if not Path(model_path).exists():
+        missing_model_paths = [
+            model_path for model_path in model_paths if not Path(model_path).exists()
+        ]
+        if missing_model_paths:
             QMessageBox.warning(
                 self,
                 "Model Not Found",
-                "Please select a valid trained model directory.",
+                "Please select valid trained model directories.",
             )
             return
         if calibration_path:
@@ -521,7 +559,7 @@ class BatchAnalysisDock(DockWidget):
         dialog.setMaximum(max(1, sum(len(videos) for _, videos in sessions)))
 
         worker = BatchAnalysisWorker(
-            model_path=model_path,
+            model_paths=model_paths,
             calibration_path=calibration_path,
             parent_dir=parent_dir,
             batch_size=self._batch_spin.value(),

@@ -212,6 +212,9 @@ class AnalysisDock(DockWidget):
         self._model_path_edit.setPlaceholderText(
             "Path to trained model directory…"
         )
+        self._model_path_edit.setToolTip(
+            "For top-down inference, select the centroid model here."
+        )
         self._model_path_edit.textChanged.connect(self._update_run_btn)
         browse_btn = QPushButton("Browse")
         browse_btn.setFixedWidth(70)
@@ -219,6 +222,22 @@ class AnalysisDock(DockWidget):
         row.addWidget(self._model_path_edit)
         row.addWidget(browse_btn)
         layout.addLayout(row)
+
+        top_down_row = QHBoxLayout()
+        self._centered_model_path_edit = QLineEdit()
+        self._centered_model_path_edit.setPlaceholderText(
+            "Optional centered-instance model directory..."
+        )
+        self._centered_model_path_edit.setToolTip(
+            "For top-down inference, select the centered-instance model here."
+        )
+        self._centered_model_path_edit.textChanged.connect(self._update_run_btn)
+        centered_browse_btn = QPushButton("Browse")
+        centered_browse_btn.setFixedWidth(70)
+        centered_browse_btn.clicked.connect(self._browse_centered_model)
+        top_down_row.addWidget(self._centered_model_path_edit)
+        top_down_row.addWidget(centered_browse_btn)
+        layout.addLayout(top_down_row)
 
         gb.setLayout(layout)
         return gb
@@ -636,6 +655,21 @@ class AnalysisDock(DockWidget):
         )
         if path:
             self._model_path_edit.setText(path)
+
+    def _browse_centered_model(self) -> None:
+        path = FileDialog.openDir(
+            self,
+            caption="Select Centered-Instance Model Directory",
+        )
+        if path:
+            self._centered_model_path_edit.setText(path)
+
+    def _selected_model_paths(self) -> List[str]:
+        model_paths = [self._model_path_edit.text().strip()]
+        centered_model_path = self._centered_model_path_edit.text().strip()
+        if centered_model_path:
+            model_paths.append(centered_model_path)
+        return model_paths
 
     def _browse_projection_calibration(self) -> None:
         filename, _ = FileDialog.open(
@@ -1198,8 +1232,8 @@ class AnalysisDock(DockWidget):
         )
         from sleap_io import save_file
 
-        model_path = self._model_path_edit.text().strip()
-        if not model_path:
+        model_paths = self._selected_model_paths()
+        if not model_paths[0]:
             return
 
         videos = self._checked_videos()
@@ -1278,7 +1312,7 @@ class AnalysisDock(DockWidget):
         )
 
         task = InferenceTask(
-            trained_job_paths=[model_path],
+            trained_job_paths=model_paths,
             labels=labels,
             labels_filename=labels_filename,
             inference_params={
