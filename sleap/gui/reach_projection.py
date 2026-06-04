@@ -281,7 +281,7 @@ def load_points3d_h5(path: str | Path) -> Dict[str, Any]:
         if "node_names" in f:
             node_names = _decode_strings(np.asarray(f["node_names"]))
         else:
-            node_names = [f"node_{i}" for i in range(points.shape[1])]
+            node_names = [f"node_{i}" for i in range(_infer_points3d_node_count(points))]
 
         metadata = {}
         if "metadata_json" in f.attrs:
@@ -783,6 +783,16 @@ def _decode_strings(values: np.ndarray) -> List[str]:
 
 def _normalize_points3d_shape(points: np.ndarray, n_nodes: int) -> np.ndarray:
     points = np.asarray(points, dtype=np.float64)
+    if points.ndim == 4:
+        if points.shape[0] == 3 and points.shape[1] == n_nodes:
+            return np.transpose(points[:, :, 0, :], (2, 1, 0))
+        if points.shape[1] == n_nodes and points.shape[2] == 3:
+            return points[:, :, :3, 0]
+        if points.shape[1] == n_nodes and points.shape[-1] == 3:
+            return points[:, :, 0, :3]
+        if points.shape[1] == 3 and points.shape[2] == n_nodes:
+            return np.moveaxis(points[:, :, :, 0], 1, -1)
+        raise ValueError(f"Could not interpret points3D shape {points.shape}.")
     if points.ndim != 3:
         raise ValueError(f"Expected points3D to be 3D, got shape {points.shape}.")
     if points.shape[-1] == 3:
@@ -792,6 +802,26 @@ def _normalize_points3d_shape(points: np.ndarray, n_nodes: int) -> np.ndarray:
     if points.shape[1] == 3 and points.shape[2] == n_nodes:
         return np.moveaxis(points, 1, -1)
     raise ValueError(f"Could not interpret points3D shape {points.shape}.")
+
+
+def _infer_points3d_node_count(points: np.ndarray) -> int:
+    """Infer node count before normalizing points3D array orientation."""
+    points = np.asarray(points)
+    if points.ndim == 4:
+        if points.shape[0] == 3:
+            return int(points.shape[1])
+        if points.shape[2] == 3 or points.shape[-1] == 3:
+            return int(points.shape[1])
+        if points.shape[1] == 3:
+            return int(points.shape[2])
+    if points.ndim == 3:
+        if points.shape[-1] == 3:
+            return int(points.shape[1])
+        if points.shape[0] == 3:
+            return int(points.shape[1])
+        if points.shape[1] == 3:
+            return int(points.shape[2])
+    raise ValueError(f"Could not infer node count from points3D shape {points.shape}.")
 
 
 def _normalize_reprojections_shape(

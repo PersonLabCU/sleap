@@ -128,6 +128,7 @@ from sleap.gui.widgets.docks import (
     InstancesDock,
     ReachesDock,
     SessionsDock,
+    Skeleton3DDock,
     SkeletonDock,
     SuggestionsDock,
     VideosDock,
@@ -1176,6 +1177,7 @@ class MainWindow(QMainWindow):
         self.suggestions_dock = SuggestionsDock(self, tab_with=self.videos_dock)
         self.instances_dock = InstancesDock(self, tab_with=self.videos_dock)
         self.sessions_dock = SessionsDock(self, tab_with=self.videos_dock)
+        self.skeleton3d_dock = Skeleton3DDock(self, tab_with=self.videos_dock)
         self.reaches_dock = ReachesDock(self, tab_with=self.videos_dock)
         self.analysis_dock = AnalysisDock(self, tab_with=self.videos_dock)
         self.batch_analysis_dock = BatchAnalysisDock(self, tab_with=self.videos_dock)

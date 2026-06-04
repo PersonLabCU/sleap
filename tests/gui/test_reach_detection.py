@@ -19,6 +19,7 @@ from sleap.gui.reach_projection import (
     _match_camera_names,
     _scores_for_reprojection_cameras,
     _triangulate_vectorized,
+    load_points3d_h5,
     translate_points3d_h5,
 )
 from sleap.gui.widgets.docks import ReachesDock
@@ -553,3 +554,24 @@ def test_translate_points3d_h5_uses_selected_node_as_frame_origin(tmp_path):
         np.testing.assert_allclose(translated[:, 0], 0.0)
         np.testing.assert_allclose(translated[:, 1], points[:, 1] - points[:, 0])
         assert f.attrs["translation_origin_node"] == "bar_R"
+
+
+def test_load_points3d_h5_accepts_matlab_tracks_shape(tmp_path):
+    src = tmp_path / "points3D.h5"
+    tracks = np.zeros((3, 2, 1, 4), dtype=np.float64)
+    tracks[:, 0, 0, :] = np.asarray(
+        [
+            [1.0, 2.0, 3.0, 4.0],
+            [10.0, 20.0, 30.0, 40.0],
+            [100.0, 200.0, 300.0, 400.0],
+        ]
+    )
+    tracks[:, 1, 0, :] = tracks[:, 0, 0, :] + 1.0
+    with h5py.File(src, "w") as f:
+        f.create_dataset("tracks", data=tracks)
+
+    loaded = load_points3d_h5(src)
+
+    assert loaded["points3d"].shape == (4, 2, 3)
+    np.testing.assert_allclose(loaded["points3d"][0, 0], [1.0, 10.0, 100.0])
+    np.testing.assert_allclose(loaded["points3d"][3, 1], [5.0, 41.0, 401.0])

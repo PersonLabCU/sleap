@@ -943,6 +943,50 @@ class SessionsDock(DockWidget):
         QMessageBox.warning(self, "Triangulation", message)
 
 
+class Skeleton3DDock(DockWidget):
+    """Dock widget with a compact launcher for the Skeleton3D popup."""
+
+    def __init__(self, main_window: QMainWindow, tab_with: Optional[QLayout] = None):
+        super().__init__(name="Skeleton3D", main_window=main_window, tab_with=tab_with)
+        self.main_window.state.connect("frame_idx", self._sync_dialog_frame)
+
+    def create_models(self) -> None:
+        return None
+
+    def create_tables(self) -> None:
+        return None
+
+    def lay_everything_out(self) -> None:
+        gb = QGroupBox("Skeleton3D")
+        layout = QVBoxLayout()
+        self.add_button(
+            layout,
+            "Open Skeleton3D...",
+            self.open_skeleton3d,
+            key="open skeleton3d",
+        )
+        gb.setLayout(layout)
+        self.wgt_layout.addWidget(gb)
+        self.wgt_layout.addStretch()
+
+    def open_skeleton3d(self) -> None:
+        """Open the standalone Skeleton3D reconstruction window."""
+        from sleap.gui.widgets.skeleton3d import Skeleton3DDialog
+
+        dialog = self.main_window._child_windows.get("skeleton3d")
+        if dialog is None:
+            dialog = Skeleton3DDialog(main_window=self.main_window, parent=self.main_window)
+            self.main_window._child_windows["skeleton3d"] = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+    def _sync_dialog_frame(self, frame_idx: int) -> None:
+        dialog = self.main_window._child_windows.get("skeleton3d")
+        if dialog is not None and dialog.isVisible():
+            dialog.set_frame(frame_idx)
+
+
 class ReachesDock(DockWidget):
     """Dock widget for reach-segment detection and curation (KPN Outward Peaks)."""
 
