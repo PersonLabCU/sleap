@@ -115,6 +115,7 @@ from sleap.gui.color import ColorManager
 from sleap.gui.commands import CommandContext, UpdateTopic
 from sleap.gui.dialogs.metrics import MetricsTableDialog
 from sleap.gui.dialogs.shortcuts import ShortcutDialog
+from sleap.gui.dialogs.user_controls import UserControlsDialog
 from sleap.gui.session_events import event_color_map, get_video_session_events
 from sleap.gui.overlays.instance import InstanceOverlay
 from sleap.gui.overlays.tracks import TrackListOverlay, TrackTrailOverlay
@@ -1157,6 +1158,7 @@ class MainWindow(QMainWindow):
         )
 
         helpMenu.addSeparator()
+        helpMenu.addAction("User Controls", self._show_user_controls_window)
         helpMenu.addAction("Keyboard Shortcuts", self._show_keyboard_shortcuts_window)
         add_menu_check_item(helpMenu, "debug mode", "Debug mode")
 
@@ -2081,6 +2083,10 @@ class MainWindow(QMainWindow):
     def _show_keyboard_shortcuts_window(self):
         """Shows gui for viewing/modifying keyboard shortucts."""
         ShortcutDialog().exec_()
+
+    def _show_user_controls_window(self):
+        """Show GUI controls, hot keys, and shortcuts."""
+        UserControlsDialog(shortcuts=self.shortcuts, menu_bar=self.menuBar()).exec_()
 
     def _show_update_checker_dialog(self):
         """Shows the update checker dialog."""
