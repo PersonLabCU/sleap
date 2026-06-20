@@ -1574,6 +1574,7 @@ class GraphicsView(QGraphicsView):
         self._group_node_origins = {}
         self._group_rect_origin = None
         self._is_group_selecting = False
+        self._group_select_press_instance = None
 
         self.zoomFactor = 1
         anchor_mode = QGraphicsView.AnchorUnderMouse
@@ -1965,15 +1966,13 @@ class GraphicsView(QGraphicsView):
                     self.setDragMode(QGraphicsView.ScrollHandDrag)
 
             elif event.modifiers() == Qt.ControlModifier:
-                # Ctrl+drag on empty space starts a multi-node rubber band selection
-                items_at = [
-                    i for i in self.scene.items(scenePos)
-                    if isinstance(i, (QtNode, QtInstance, VisibleBoundingBox))
-                ]
-                if not items_at:
-                    self._clear_group_selection()
-                    self._is_group_selecting = True
-                    self.setDragMode(QGraphicsView.RubberBandDrag)
+                # Ctrl+drag anywhere starts a multi-node rubber band selection.
+                # Remember the instance under a stationary press so Ctrl+click can
+                # retain its existing duplicate-instance behavior on release.
+                self._clear_group_selection()
+                self._group_select_press_instance = self.getTopInstanceAt(scenePos)
+                self._is_group_selecting = True
+                self.setDragMode(QGraphicsView.RubberBandDrag)
 
             elif event.modifiers() == Qt.AltModifier:
                 if self.canZoom:
@@ -2019,6 +2018,13 @@ class GraphicsView(QGraphicsView):
                     self._apply_group_selection(selection_rect)
                 else:
                     self._clear_group_selection()
+                    pressed_instance = self._group_select_press_instance
+                    if pressed_instance is not None:
+                        for qt_instance in self.all_instances:
+                            if qt_instance.instance is pressed_instance:
+                                qt_instance.duplicate_instance()
+                                break
+                self._group_select_press_instance = None
                 self.leftMouseButtonReleased.emit(scenePos.x(), scenePos.y())
                 return
 
@@ -2815,6 +2821,14 @@ class QtNode(QGraphicsEllipseItem):
         if parent is None:
             return
 
+        if (
+            event.button() == Qt.LeftButton
+            and event.modifiers() == Qt.ControlModifier
+            and parent.display_view._is_group_selecting
+        ):
+            event.ignore()
+            return
+
         # Do nothing if node is from predicted instance
         if parent.predicted:
             # Shift+click should propagate to QtInstance for whole-instance drag
@@ -3533,7 +3547,10 @@ class QtInstance(QGraphicsObject):
         """Custom event handler for mouse press."""
         if event.buttons() == Qt.LeftButton:
             if event.modifiers() == Qt.ControlModifier:
-                self.duplicate_instance()
+                if self.display_view._is_group_selecting:
+                    event.ignore()
+                else:
+                    self.duplicate_instance()
             elif event.modifiers() == Qt.ShiftModifier and self.predicted:
                 # Shift+click inside predicted instance bounding box: start drag
                 self._pred_drag_start = event.scenePos()
@@ -3742,6 +3759,12 @@ class VisibleBoundingBox(QtWidgets.QGraphicsRectItem):
         stores relevant information about the bounding box before the transformation.
         """
         if event.button() == Qt.LeftButton:
+            if (
+                event.modifiers() == Qt.ControlModifier
+                and self.parent.display_view._is_group_selecting
+            ):
+                event.ignore()
+                return
             if self.top_left_box.contains(event.pos()):
                 self.resizing = "top_left"
                 self.origin = self.rect().bottomRight()
