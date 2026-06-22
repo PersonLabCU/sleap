@@ -167,7 +167,6 @@ class AnalysisDock(DockWidget):
         layout.addWidget(self._build_model_group())
         layout.addWidget(self._build_videos_group())
         layout.addWidget(self._build_options_group())
-        layout.addWidget(self._build_prediction_preview_group())
         layout.addSpacing(4)
 
         self._run_btn = QPushButton("Run Inference")
@@ -184,6 +183,7 @@ class AnalysisDock(DockWidget):
             "color: #9ca3af; font-size: 10px; padding: 2px 0;"
         )
         layout.addWidget(self._status_label)
+        layout.addWidget(self._build_prediction_preview_group())
         layout.addWidget(self._build_convert_predictions_group())
         layout.addWidget(self._build_projection_group())
         layout.addStretch()
