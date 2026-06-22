@@ -66,11 +66,10 @@ def get_last_frame_idx(video=None):
     """
     if video is None:
         return None
-    if hasattr(video.backend, "source_inds"):
-        source_inds = video.backend.source_inds
+    source_inds = getattr(video.backend, "source_inds", None)
+    if source_inds is not None:
         return max(source_inds)
-    else:
-        return len(video) - 1
+    return len(video) - 1
 
 
 def video_get_frames(video: Video) -> int:
