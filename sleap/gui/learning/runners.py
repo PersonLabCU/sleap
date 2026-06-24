@@ -13,6 +13,7 @@ import tempfile
 import time
 import shutil
 import yaml
+import numpy as np
 from pathlib import Path
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Text, Tuple
@@ -21,7 +22,7 @@ from sleap.util import show_sleap_nn_installation_message
 
 from qtpy import QtCore, QtWidgets
 
-from sleap_io import Labels, Video, LabeledFrame
+from sleap_io import Labels, Video, LabeledFrame, PredictedInstance
 import sleap_io as sio
 from sleap.gui.learning.configs import ConfigFileInfo
 
@@ -300,7 +301,7 @@ class InferenceWorker(QtCore.QThread):
         if success:
             # Load frames from inference into results list
             new_inference_labels = sio.load_slp(output_path)
-            self._inference_task.results.extend(new_inference_labels.labeled_frames)
+            self._inference_task.add_result_labels(new_inference_labels)
 
         ret = "success" if success else proc.returncode
         return output_path, ret
@@ -531,6 +532,153 @@ class InferenceTask:
     labels_filename: Optional[str] = None
     results: List[LabeledFrame] = attr.ib(default=attr.Factory(list))
 
+    def add_result_labels(self, new_labels: Labels) -> None:
+        """Add inference results, aligned to the project skeleton when possible."""
+        self._align_result_skeletons_to_project(new_labels)
+        self.results.extend(new_labels.labeled_frames)
+
+    def _align_result_skeletons_to_project(self, new_labels: Labels) -> None:
+        """Align predicted points from model node order to project node order."""
+        if self.labels is None or not getattr(self.labels, "skeletons", None):
+            return
+
+        model_node_names = self._get_model_node_names()
+        if not model_node_names:
+            return
+
+        project_skeleton = self._matching_project_skeleton(model_node_names)
+        if project_skeleton is None:
+            return
+
+        for lf in new_labels.labeled_frames:
+            lf.instances = [
+                self._remap_predicted_instance(
+                    instance,
+                    project_skeleton,
+                    model_node_names,
+                )
+                if isinstance(instance, PredictedInstance)
+                else instance
+                for instance in lf.instances
+            ]
+
+    def _matching_project_skeleton(self, model_node_names: List[str]):
+        """Return the project skeleton that best matches model node names."""
+        model_node_set = set(model_node_names)
+        for skeleton in self.labels.skeletons:
+            if set(skeleton.node_names) == model_node_set:
+                return skeleton
+
+        if len(self.labels.skeletons) == 1:
+            return self.labels.skeletons[0]
+
+        return None
+
+    @staticmethod
+    def _remap_predicted_instance(
+        instance: PredictedInstance,
+        project_skeleton,
+        model_node_names: List[str],
+    ) -> PredictedInstance:
+        """Copy predicted points into a project skeleton using model node names."""
+        points = np.full((len(project_skeleton.nodes), 2), np.nan, dtype=np.float64)
+        point_scores = np.full(len(project_skeleton.nodes), np.nan, dtype=np.float64)
+        source_index_by_name = {
+            name: idx
+            for idx, name in enumerate(model_node_names)
+            if idx < len(instance.points)
+        }
+        point_fields = instance.points.dtype.names or ()
+
+        for target_idx, node_name in enumerate(project_skeleton.node_names):
+            source_idx = source_index_by_name.get(node_name)
+            if source_idx is None:
+                continue
+            source_point = instance.points[source_idx]
+            points[target_idx] = source_point["xy"]
+            if "score" in point_fields:
+                point_scores[target_idx] = source_point["score"]
+
+        remapped = PredictedInstance.from_numpy(
+            points,
+            skeleton=project_skeleton,
+            point_scores=point_scores,
+            score=getattr(instance, "score", 0.0),
+            track=getattr(instance, "track", None),
+            tracking_score=getattr(instance, "tracking_score", None),
+            from_predicted=getattr(instance, "from_predicted", None),
+        )
+
+        for target_idx, node_name in enumerate(project_skeleton.node_names):
+            source_idx = source_index_by_name.get(node_name)
+            if source_idx is None:
+                continue
+            if "visible" in point_fields:
+                remapped.points[target_idx]["visible"] = instance.points[source_idx][
+                    "visible"
+                ]
+            if "complete" in point_fields:
+                remapped.points[target_idx]["complete"] = instance.points[source_idx][
+                    "complete"
+                ]
+
+        return remapped
+
+    def _get_model_node_names(self) -> Optional[List[str]]:
+        """Read model skeleton node order from the saved training config."""
+        for trained_job_path in self.trained_job_paths:
+            cfg_path = self._find_training_config_path(trained_job_path)
+            if cfg_path is None:
+                continue
+
+            try:
+                cfg = OmegaConf.load(cfg_path)
+            except Exception:
+                logger.warning("Could not read training config: %s", cfg_path)
+                continue
+
+            skeletons = OmegaConf.select(cfg, "data_config.skeletons", default=None)
+            if not skeletons:
+                continue
+
+            nodes = skeletons[0].get("nodes", [])
+            node_names = []
+            for node in nodes:
+                if isinstance(node, str):
+                    node_names.append(node)
+                else:
+                    name = node.get("name", None)
+                    if name is not None:
+                        node_names.append(str(name))
+
+            if node_names:
+                return node_names
+
+        return None
+
+    @staticmethod
+    def _find_training_config_path(trained_job_path: str) -> Optional[Path]:
+        """Find a training config file from a model directory or config path."""
+        path = Path(trained_job_path)
+        if path.is_file():
+            return path
+        if not path.is_dir():
+            return None
+
+        for filename in (
+            "training_config.yaml",
+            "training_config.yml",
+            "training_config.json",
+            "initial_config.yaml",
+            "initial_config.yml",
+            "initial_config.json",
+        ):
+            cfg_path = path / filename
+            if cfg_path.exists():
+                return cfg_path
+
+        return None
+
     def make_predict_cli_call(
         self,
         item_for_inference: ItemForInference,
@@ -728,7 +876,7 @@ class InferenceTask:
         if success and append_results:
             # Load frames from inference into results list
             new_inference_labels = sio.load_slp(output_path)
-            self.results.extend(new_inference_labels.labeled_frames)
+            self.add_result_labels(new_inference_labels)
 
         # Return "success" or return code if failed.
         ret = "success" if success else proc.returncode

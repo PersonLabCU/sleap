@@ -5,6 +5,7 @@ DLC import all work correctly with the `frame=` parameter.
 """
 
 import pytest
+import numpy as np
 from copy import deepcopy
 
 from sleap_io import Labels, LabeledFrame, Instance, PredictedInstance, Video, Skeleton
@@ -254,6 +255,59 @@ class TestInferenceResultMerging:
         assert len(task.results) == 0 or all(
             len(lf.instances) > 0 for lf in task.results
         )
+
+    def test_inference_results_remap_from_model_node_order(self, tmp_path):
+        """Predictions should use model node order when project nodes were reordered."""
+        from sleap.gui.learning.runners import InferenceTask
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "    - name: abdomen",
+                ]
+            )
+        )
+
+        project_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        video = Video(filename="video.mp4")
+        project_labels = Labels(videos=[video], skeletons=[project_skeleton])
+
+        # Simulate bad inference output: coordinates are in model order, but the
+        # prediction skeleton has the current project order.
+        prediction_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        prediction = PredictedInstance.from_numpy(
+            np.asarray([[1, 1], [2, 2], [3, 3]], dtype=np.float64),
+            skeleton=prediction_skeleton,
+            point_scores=np.asarray([0.1, 0.2, 0.3], dtype=np.float64),
+            score=0.9,
+        )
+        lf = LabeledFrame(video=video, frame_idx=0)
+        lf.instances.append(prediction)
+        prediction_labels = Labels(
+            videos=[video],
+            skeletons=[prediction_skeleton],
+            labeled_frames=[lf],
+        )
+
+        task = InferenceTask(
+            trained_job_paths=[str(model_dir)],
+            labels=project_labels,
+        )
+        task.add_result_labels(prediction_labels)
+
+        remapped = task.results[0].instances[0]
+        assert remapped.skeleton is project_skeleton
+        np.testing.assert_array_equal(remapped.points[0]["xy"], [3, 3])
+        np.testing.assert_array_equal(remapped.points[1]["xy"], [1, 1])
+        np.testing.assert_array_equal(remapped.points[2]["xy"], [2, 2])
+        np.testing.assert_array_equal(remapped.points["score"], [0.3, 0.1, 0.2])
 
 
 class TestImportDLCFolderMerge:
