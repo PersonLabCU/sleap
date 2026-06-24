@@ -8,6 +8,7 @@ import pytest
 import numpy as np
 from copy import deepcopy
 
+import sleap_io as sio
 from sleap_io import Labels, LabeledFrame, Instance, PredictedInstance, Video, Skeleton
 from sleap.gui.dialogs.merge import show_instance_type_counts
 
@@ -308,6 +309,101 @@ class TestInferenceResultMerging:
         np.testing.assert_array_equal(remapped.points[1]["xy"], [1, 1])
         np.testing.assert_array_equal(remapped.points[2]["xy"], [2, 2])
         np.testing.assert_array_equal(remapped.points["score"], [0.3, 0.1, 0.2])
+
+    def test_refined_model_uses_pretrained_head_node_order(self, tmp_path):
+        """Refined models should honor old head order when configs differ by order."""
+        from sleap.gui.learning.runners import InferenceTask
+
+        base_model_dir = tmp_path / "base_model"
+        base_model_dir.mkdir()
+        (base_model_dir / "best.ckpt").touch()
+        (base_model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "    - name: abdomen",
+                ]
+            )
+        )
+
+        refined_model_dir = tmp_path / "refined_model"
+        refined_model_dir.mkdir()
+        (refined_model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: abdomen",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "model_config:",
+                    f"  pretrained_head_weights: {base_model_dir / 'best.ckpt'}",
+                ]
+            )
+        )
+
+        project_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        video = Video(filename="video.mp4")
+        project_labels = Labels(videos=[video], skeletons=[project_skeleton])
+
+        prediction = PredictedInstance.from_numpy(
+            np.asarray([[1, 1], [2, 2], [3, 3]], dtype=np.float64),
+            skeleton=project_skeleton,
+            score=0.9,
+        )
+        lf = LabeledFrame(video=video, frame_idx=0, instances=[prediction])
+        prediction_labels = Labels(
+            videos=[video],
+            skeletons=[project_skeleton],
+            labeled_frames=[lf],
+        )
+
+        task = InferenceTask(
+            trained_job_paths=[str(refined_model_dir)],
+            labels=project_labels,
+        )
+        task.add_result_labels(prediction_labels)
+
+        remapped = task.results[0].instances[0]
+        np.testing.assert_array_equal(remapped.points[0]["xy"], [3, 3])
+        np.testing.assert_array_equal(remapped.points[1]["xy"], [1, 1])
+        np.testing.assert_array_equal(remapped.points[2]["xy"], [2, 2])
+
+    def test_training_labels_copy_uses_model_node_order(self, tmp_path):
+        """Refinement training should not write reordered nodes into the project file."""
+        from sleap.gui.learning.runners import _make_model_order_training_labels
+
+        project_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        video = Video(filename="video.mp4")
+        labels = Labels(videos=[video], skeletons=[project_skeleton])
+        instance = Instance.from_numpy(
+            np.asarray([[3, 3], [1, 1], [2, 2]], dtype=np.float64),
+            skeleton=project_skeleton,
+        )
+        labels.append(LabeledFrame(video=video, frame_idx=0, instances=[instance]))
+
+        labels_path = tmp_path / "labels.slp"
+        model_node_names = ["head", "thorax", "abdomen"]
+        training_labels_path = _make_model_order_training_labels(
+            labels=labels,
+            labels_filename=labels_path.as_posix(),
+            model_node_names=model_node_names,
+            temp_dir=tmp_path.as_posix(),
+        )
+
+        training_labels = sio.load_slp(training_labels_path)
+        training_instance = training_labels[0].instances[0]
+
+        assert labels.skeleton.node_names == ["abdomen", "head", "thorax"]
+        assert training_labels.skeleton.node_names == model_node_names
+        np.testing.assert_array_equal(training_instance.points[0]["xy"], [1, 1])
+        np.testing.assert_array_equal(training_instance.points[1]["xy"], [2, 2])
+        np.testing.assert_array_equal(training_instance.points[2]["xy"], [3, 3])
 
 
 class TestImportDLCFolderMerge:

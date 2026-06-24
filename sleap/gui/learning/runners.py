@@ -31,6 +31,136 @@ from sleap.gui.config_utils import filter_cfg
 logger = logging.getLogger(__name__)
 
 
+def _find_training_config_path(trained_job_path: str) -> Optional[Path]:
+    """Find a training config file from a model directory or config path."""
+    path = Path(trained_job_path)
+    if path.is_file() and path.suffix.lower() in (".yaml", ".yml", ".json"):
+        return path
+
+    search_dir = path if path.is_dir() else path.parent
+    if not search_dir.exists():
+        return None
+
+    for filename in (
+        "training_config.yaml",
+        "training_config.yml",
+        "training_config.json",
+        "initial_config.yaml",
+        "initial_config.yml",
+        "initial_config.json",
+    ):
+        cfg_path = search_dir / filename
+        if cfg_path.exists():
+            return cfg_path
+
+    return None
+
+
+def _node_names_from_config(cfg: OmegaConf) -> Optional[List[str]]:
+    """Return skeleton node names from a training config."""
+    skeletons = OmegaConf.select(cfg, "data_config.skeletons", default=None)
+    if not skeletons:
+        return None
+
+    nodes = skeletons[0].get("nodes", [])
+    node_names = []
+    for node in nodes:
+        if isinstance(node, str):
+            node_names.append(node)
+        else:
+            name = node.get("name", None)
+            if name is not None:
+                node_names.append(str(name))
+
+    return node_names or None
+
+
+def _get_model_node_names_from_paths(
+    trained_job_paths: List[str],
+    prefer_pretrained_head_order: bool = True,
+) -> Optional[List[str]]:
+    """Read the model output node order from saved training configs."""
+    for trained_job_path in trained_job_paths:
+        cfg_path = _find_training_config_path(trained_job_path)
+        if cfg_path is None:
+            continue
+
+        try:
+            cfg = OmegaConf.load(cfg_path)
+        except Exception:
+            logger.warning("Could not read training config: %s", cfg_path)
+            continue
+
+        node_names = _node_names_from_config(cfg)
+        if not node_names:
+            continue
+
+        if prefer_pretrained_head_order:
+            pretrained_head = OmegaConf.select(
+                cfg,
+                "model_config.pretrained_head_weights",
+                default=None,
+            )
+            if pretrained_head:
+                pretrained_node_names = _get_model_node_names_from_paths(
+                    [str(pretrained_head)],
+                    prefer_pretrained_head_order=False,
+                )
+                if (
+                    pretrained_node_names
+                    and set(pretrained_node_names) == set(node_names)
+                    and pretrained_node_names != node_names
+                ):
+                    return pretrained_node_names
+
+        return node_names
+
+    return None
+
+
+def _matching_skeleton_index(labels: Labels, node_names: List[str]) -> Optional[int]:
+    """Return index of labels skeleton with the same node names."""
+    node_set = set(node_names)
+    for idx, skeleton in enumerate(labels.skeletons):
+        if set(skeleton.node_names) == node_set:
+            return idx
+
+    if len(labels.skeletons) == 1:
+        return 0
+
+    return None
+
+
+def _make_model_order_training_labels(
+    labels: Labels,
+    labels_filename: str,
+    model_node_names: Optional[List[str]],
+    temp_dir: str,
+) -> str:
+    """Save a temporary labels copy in model node order for refinement."""
+    if not model_node_names:
+        return labels_filename
+
+    skeleton_idx = _matching_skeleton_index(labels, model_node_names)
+    if skeleton_idx is None:
+        return labels_filename
+
+    project_skeleton = labels.skeletons[skeleton_idx]
+    if list(project_skeleton.node_names) == model_node_names:
+        return labels_filename
+
+    if set(project_skeleton.node_names) != set(model_node_names):
+        return labels_filename
+
+    training_labels = deepcopy(labels)
+    training_skeleton = training_labels.skeletons[skeleton_idx]
+    training_labels.reorder_nodes(model_node_names, skeleton=training_skeleton)
+
+    temp_path = Path(temp_dir) / f"{Path(labels_filename).stem}.model_order.slp"
+    sio.save_file(training_labels, temp_path.as_posix(), verbose=False)
+    return temp_path.as_posix()
+
+
 class InferenceProgressDialog(QtWidgets.QDialog):
     """Custom progress dialog for inference with log display.
 
@@ -626,58 +756,7 @@ class InferenceTask:
 
     def _get_model_node_names(self) -> Optional[List[str]]:
         """Read model skeleton node order from the saved training config."""
-        for trained_job_path in self.trained_job_paths:
-            cfg_path = self._find_training_config_path(trained_job_path)
-            if cfg_path is None:
-                continue
-
-            try:
-                cfg = OmegaConf.load(cfg_path)
-            except Exception:
-                logger.warning("Could not read training config: %s", cfg_path)
-                continue
-
-            skeletons = OmegaConf.select(cfg, "data_config.skeletons", default=None)
-            if not skeletons:
-                continue
-
-            nodes = skeletons[0].get("nodes", [])
-            node_names = []
-            for node in nodes:
-                if isinstance(node, str):
-                    node_names.append(node)
-                else:
-                    name = node.get("name", None)
-                    if name is not None:
-                        node_names.append(str(name))
-
-            if node_names:
-                return node_names
-
-        return None
-
-    @staticmethod
-    def _find_training_config_path(trained_job_path: str) -> Optional[Path]:
-        """Find a training config file from a model directory or config path."""
-        path = Path(trained_job_path)
-        if path.is_file():
-            return path
-        if not path.is_dir():
-            return None
-
-        for filename in (
-            "training_config.yaml",
-            "training_config.yml",
-            "training_config.json",
-            "initial_config.yaml",
-            "initial_config.yml",
-            "initial_config.json",
-        ):
-            cfg_path = path / filename
-            if cfg_path.exists():
-                return cfg_path
-
-        return None
+        return _get_model_node_names_from_paths(self.trained_job_paths)
 
     def make_predict_cli_call(
         self,
@@ -1289,14 +1368,25 @@ def run_gui_training(
                     if win.canceled:
                         return "cancel"
 
-            # Run training
-            trained_job_path, ret = train_subprocess(
-                job_config=job,
-                inference_params=inference_params,
-                labels_filename=labels_filename,
-                video_paths=video_path_list,
-                waiting_callback=waiting,
+            # Run training. When refining from a model trained before a node-order
+            # change, keep the training labels in the pretrained head's node order.
+            model_node_names = _get_model_node_names_from_paths(
+                [config_info.path] if config_info.path else []
             )
+            with tempfile.TemporaryDirectory() as temp_dir:
+                train_labels_filename = _make_model_order_training_labels(
+                    labels=labels,
+                    labels_filename=labels_filename,
+                    model_node_names=model_node_names,
+                    temp_dir=temp_dir,
+                )
+                trained_job_path, ret = train_subprocess(
+                    job_config=job,
+                    inference_params=inference_params,
+                    labels_filename=train_labels_filename,
+                    video_paths=video_path_list,
+                    waiting_callback=waiting,
+                )
 
             if ret == "success":
                 # get the path to the resulting TrainingJob file
