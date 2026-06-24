@@ -479,6 +479,58 @@ class TestInferenceResultMerging:
         np.testing.assert_array_equal(remapped.points[1]["xy"], [1, 1])
         np.testing.assert_array_equal(remapped.points[2]["xy"], [2, 2])
 
+    def test_remapped_prediction_labels_can_be_saved(self, tmp_path):
+        """Remapped predictions should keep their skeleton in the labels object."""
+        from sleap.gui.learning.runners import InferenceTask
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        (model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "    - name: abdomen",
+                ]
+            )
+        )
+
+        project_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        prediction_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        video = Video(filename="video.mp4")
+        project_labels = Labels(videos=[video], skeletons=[project_skeleton])
+        prediction = PredictedInstance.from_numpy(
+            np.asarray([[1, 1], [2, 2], [3, 3]], dtype=np.float64),
+            skeleton=prediction_skeleton,
+            score=0.9,
+        )
+        prediction_labels = Labels(
+            videos=[video],
+            skeletons=[prediction_skeleton],
+            labeled_frames=[
+                LabeledFrame(video=video, frame_idx=0, instances=[prediction])
+            ],
+        )
+
+        task = InferenceTask(
+            trained_job_paths=[str(model_dir)],
+            labels=project_labels,
+        )
+        task.add_result_labels(prediction_labels)
+
+        output_path = tmp_path / "predictions.slp"
+        sio.save_file(prediction_labels, output_path.as_posix(), verbose=False)
+        reloaded = sio.load_slp(output_path.as_posix())
+
+        assert reloaded[0].instances[0].skeleton.node_names == [
+            "abdomen",
+            "head",
+            "thorax",
+        ]
+
 
 class TestImportDLCFolderMerge:
     """Tests for ImportDeepLabCutFolder merge functionality."""

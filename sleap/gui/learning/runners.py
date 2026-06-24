@@ -718,6 +718,9 @@ class InferenceTask:
         if project_skeleton is None:
             return False
 
+        if not any(skeleton is project_skeleton for skeleton in new_labels.skeletons):
+            new_labels.skeletons.append(project_skeleton)
+
         changed = False
         for lf in new_labels.labeled_frames:
             lf.instances = [
@@ -733,6 +736,7 @@ class InferenceTask:
             changed = True
 
         return changed
+
     def _matching_project_skeleton(self, model_node_names: List[str]):
         """Return the project skeleton that best matches model node names."""
         model_node_set = set(model_node_names)
