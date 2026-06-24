@@ -56,6 +56,33 @@ def _find_training_config_path(trained_job_path: str) -> Optional[Path]:
     return None
 
 
+def _find_initial_config_path(trained_job_path: str) -> Optional[Path]:
+    """Find the initial config saved before training, if present."""
+    path = Path(trained_job_path)
+    search_dir = path if path.is_dir() else path.parent
+    if not search_dir.exists():
+        return None
+
+    for filename in ("initial_config.yaml", "initial_config.yml", "initial_config.json"):
+        cfg_path = search_dir / filename
+        if cfg_path.exists():
+            return cfg_path
+
+    return None
+
+
+def _load_config(cfg_path: Optional[Path]) -> Optional[OmegaConf]:
+    """Load a config file, returning None if unavailable."""
+    if cfg_path is None:
+        return None
+
+    try:
+        return OmegaConf.load(cfg_path)
+    except Exception:
+        logger.warning("Could not read training config: %s", cfg_path)
+        return None
+
+
 def _node_names_from_config(cfg: OmegaConf) -> Optional[List[str]]:
     """Return skeleton node names from a training config."""
     skeletons = OmegaConf.select(cfg, "data_config.skeletons", default=None)
@@ -75,6 +102,19 @@ def _node_names_from_config(cfg: OmegaConf) -> Optional[List[str]]:
     return node_names or None
 
 
+def _pretrained_head_path_from_config(cfg: Optional[OmegaConf]) -> Optional[str]:
+    """Return pretrained head checkpoint path from a config, if present."""
+    if cfg is None:
+        return None
+
+    pretrained_head = OmegaConf.select(
+        cfg,
+        "model_config.pretrained_head_weights",
+        default=None,
+    )
+    return str(pretrained_head) if pretrained_head else None
+
+
 def _get_model_node_names_from_paths(
     trained_job_paths: List[str],
     prefer_pretrained_head_order: bool = True,
@@ -82,28 +122,23 @@ def _get_model_node_names_from_paths(
     """Read the model output node order from saved training configs."""
     for trained_job_path in trained_job_paths:
         cfg_path = _find_training_config_path(trained_job_path)
-        if cfg_path is None:
+        cfg = _load_config(cfg_path)
+        if cfg is None:
             continue
 
-        try:
-            cfg = OmegaConf.load(cfg_path)
-        except Exception:
-            logger.warning("Could not read training config: %s", cfg_path)
-            continue
+        initial_cfg = _load_config(_find_initial_config_path(trained_job_path))
 
         node_names = _node_names_from_config(cfg)
         if not node_names:
             continue
 
         if prefer_pretrained_head_order:
-            pretrained_head = OmegaConf.select(
-                cfg,
-                "model_config.pretrained_head_weights",
-                default=None,
-            )
+            pretrained_head = _pretrained_head_path_from_config(
+                cfg
+            ) or _pretrained_head_path_from_config(initial_cfg)
             if pretrained_head:
                 pretrained_node_names = _get_model_node_names_from_paths(
-                    [str(pretrained_head)],
+                    [pretrained_head],
                     prefer_pretrained_head_order=False,
                 )
                 if (
@@ -431,7 +466,9 @@ class InferenceWorker(QtCore.QThread):
         if success:
             # Load frames from inference into results list
             new_inference_labels = sio.load_slp(output_path)
-            self._inference_task.add_result_labels(new_inference_labels)
+            changed = self._inference_task.add_result_labels(new_inference_labels)
+            if changed:
+                sio.save_file(new_inference_labels, output_path, verbose=False)
 
         ret = "success" if success else proc.returncode
         return output_path, ret
@@ -662,24 +699,26 @@ class InferenceTask:
     labels_filename: Optional[str] = None
     results: List[LabeledFrame] = attr.ib(default=attr.Factory(list))
 
-    def add_result_labels(self, new_labels: Labels) -> None:
+    def add_result_labels(self, new_labels: Labels) -> bool:
         """Add inference results, aligned to the project skeleton when possible."""
-        self._align_result_skeletons_to_project(new_labels)
+        changed = self._align_result_skeletons_to_project(new_labels)
         self.results.extend(new_labels.labeled_frames)
+        return changed
 
-    def _align_result_skeletons_to_project(self, new_labels: Labels) -> None:
+    def _align_result_skeletons_to_project(self, new_labels: Labels) -> bool:
         """Align predicted points from model node order to project node order."""
         if self.labels is None or not getattr(self.labels, "skeletons", None):
-            return
+            return False
 
         model_node_names = self._get_model_node_names()
         if not model_node_names:
-            return
+            return False
 
         project_skeleton = self._matching_project_skeleton(model_node_names)
         if project_skeleton is None:
-            return
+            return False
 
+        changed = False
         for lf in new_labels.labeled_frames:
             lf.instances = [
                 self._remap_predicted_instance(
@@ -691,7 +730,9 @@ class InferenceTask:
                 else instance
                 for instance in lf.instances
             ]
+            changed = True
 
+        return changed
     def _matching_project_skeleton(self, model_node_names: List[str]):
         """Return the project skeleton that best matches model node names."""
         model_node_set = set(model_node_names)
@@ -955,7 +996,9 @@ class InferenceTask:
         if success and append_results:
             # Load frames from inference into results list
             new_inference_labels = sio.load_slp(output_path)
-            self.add_result_labels(new_inference_labels)
+            changed = self.add_result_labels(new_inference_labels)
+            if changed:
+                sio.save_file(new_inference_labels, output_path, verbose=False)
 
         # Return "success" or return code if failed.
         ret = "success" if success else proc.returncode

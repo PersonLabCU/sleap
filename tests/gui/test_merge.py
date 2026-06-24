@@ -405,6 +405,80 @@ class TestInferenceResultMerging:
         np.testing.assert_array_equal(training_instance.points[1]["xy"], [2, 2])
         np.testing.assert_array_equal(training_instance.points[2]["xy"], [3, 3])
 
+    def test_refined_model_uses_initial_config_pretrained_head_order(self, tmp_path):
+        """Initial config can preserve the base model path for refined models."""
+        from sleap.gui.learning.runners import InferenceTask
+
+        base_model_dir = tmp_path / "base_model"
+        base_model_dir.mkdir()
+        (base_model_dir / "best.ckpt").touch()
+        (base_model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "    - name: abdomen",
+                ]
+            )
+        )
+
+        refined_model_dir = tmp_path / "refined_model"
+        refined_model_dir.mkdir()
+        (refined_model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: abdomen",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "model_config:",
+                    "  pretrained_head_weights: null",
+                ]
+            )
+        )
+        (refined_model_dir / "initial_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons: []",
+                    "model_config:",
+                    f"  pretrained_head_weights: {base_model_dir / 'best.ckpt'}",
+                ]
+            )
+        )
+
+        project_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        video = Video(filename="video.mp4")
+        project_labels = Labels(videos=[video], skeletons=[project_skeleton])
+        prediction = PredictedInstance.from_numpy(
+            np.asarray([[1, 1], [2, 2], [3, 3]], dtype=np.float64),
+            skeleton=project_skeleton,
+            score=0.9,
+        )
+        prediction_labels = Labels(
+            videos=[video],
+            skeletons=[project_skeleton],
+            labeled_frames=[
+                LabeledFrame(video=video, frame_idx=0, instances=[prediction])
+            ],
+        )
+
+        task = InferenceTask(
+            trained_job_paths=[str(refined_model_dir)],
+            labels=project_labels,
+        )
+        task.add_result_labels(prediction_labels)
+
+        remapped = task.results[0].instances[0]
+        np.testing.assert_array_equal(remapped.points[0]["xy"], [3, 3])
+        np.testing.assert_array_equal(remapped.points[1]["xy"], [1, 1])
+        np.testing.assert_array_equal(remapped.points[2]["xy"], [2, 2])
+
 
 class TestImportDLCFolderMerge:
     """Tests for ImportDeepLabCutFolder merge functionality."""
