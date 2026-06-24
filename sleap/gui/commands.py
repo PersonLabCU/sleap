@@ -585,6 +585,10 @@ class CommandContext:
         """Removes (currently selected) node from skeleton."""
         self.execute(DeleteNode)
 
+    def moveNode(self, offset: int):
+        """Moves the currently selected node up or down in the skeleton."""
+        self.execute(MoveNode, offset=offset)
+
     def setNodeName(self, skeleton, node, name):
         """Changes name of node in skeleton."""
         self.execute(SetNodeName, skeleton=skeleton, node=node, name=name)
@@ -3738,6 +3742,38 @@ class DeleteNode(EditCommand):
         else:
             # Fallback when no labels (e.g., skeleton-only editing)
             skeleton.remove_node(node)
+
+
+class MoveNode(EditCommand):
+    topics = [UpdateTopic.skeleton, UpdateTopic.frame, UpdateTopic.project_instances]
+
+    @staticmethod
+    def ask(context: CommandContext, params: dict) -> bool:
+        node = context.state["selected_node"]
+        skeleton = context.state["skeleton"]
+        if node is None or node not in skeleton:
+            return False
+
+        new_idx = skeleton.index(node) + params["offset"]
+        return 0 <= new_idx < len(skeleton.nodes)
+
+    @staticmethod
+    def do_action(context: CommandContext, params: dict):
+        node = context.state["selected_node"]
+        skeleton = context.state["skeleton"]
+        offset = params["offset"]
+        old_idx = skeleton.index(node)
+        new_idx = old_idx + offset
+
+        skeleton.nodes[old_idx], skeleton.nodes[new_idx] = (
+            skeleton.nodes[new_idx],
+            skeleton.nodes[old_idx],
+        )
+        skeleton.rebuild_cache()
+        align_labeled_frames_to_skeleton(context.labels, skeleton)
+        if context.labels is not None:
+            context.labels.update()
+        context.state["selected_node"] = node
 
 
 class SetNodeName(EditCommand):

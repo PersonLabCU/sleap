@@ -299,6 +299,14 @@ class SkeletonDock(DockWidget):
         hb = QHBoxLayout()
         self.add_button(hb, "New Node", main_window.commands.newNode)
         self.add_button(hb, "Delete Node", main_window.commands.deleteNode)
+        move_up_button = self.add_button(
+            hb, "\u2191", lambda: main_window.commands.moveNode(-1), key="move up"
+        )
+        move_up_button.setToolTip("Move selected node up")
+        move_down_button = self.add_button(
+            hb, "\u2193", lambda: main_window.commands.moveNode(1), key="move down"
+        )
+        move_down_button.setToolTip("Move selected node down")
 
         hbw = QWidget()
         hbw.setLayout(hb)

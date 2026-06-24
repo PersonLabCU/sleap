@@ -1359,6 +1359,8 @@ class MainWindow(QMainWindow):
         self._buttons["add edge"].setEnabled(has_nodes_selected)
         self._buttons["delete edge"].setEnabled(has_selected_edge)
         self._buttons["delete node"].setEnabled(has_selected_node)
+        self._buttons["move up"].setEnabled(has_selected_node)
+        self._buttons["move down"].setEnabled(has_selected_node)
         self._buttons["toggle grayscale"].setEnabled(has_video)
         self._buttons["show video"].setEnabled(has_selected_video)
         self._buttons["remove video"].setEnabled(has_video)
