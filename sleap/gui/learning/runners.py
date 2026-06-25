@@ -115,6 +115,44 @@ def _pretrained_head_path_from_config(cfg: Optional[OmegaConf]) -> Optional[str]
     return str(pretrained_head) if pretrained_head else None
 
 
+def _model_sort_key(path: Path) -> str:
+    """Return a sortable key for timestamp-prefixed model directories."""
+    return path.name.split(".", 1)[0]
+
+
+def _get_sibling_model_node_names(
+    trained_job_path: str,
+    node_names: List[str],
+) -> Optional[List[str]]:
+    """Find an earlier sibling model with matching nodes in a different order."""
+    path = Path(trained_job_path)
+    model_dir = path if path.is_dir() else path.parent
+    models_dir = model_dir.parent
+    if not models_dir.exists():
+        return None
+
+    current_key = _model_sort_key(model_dir)
+    candidates = []
+    for sibling in models_dir.iterdir():
+        if not sibling.is_dir() or sibling == model_dir:
+            continue
+        if _model_sort_key(sibling) >= current_key:
+            continue
+        candidates.append(sibling)
+
+    for sibling in sorted(candidates, key=_model_sort_key, reverse=True):
+        cfg = _load_config(_find_training_config_path(str(sibling)))
+        sibling_node_names = _node_names_from_config(cfg) if cfg is not None else None
+        if (
+            sibling_node_names
+            and set(sibling_node_names) == set(node_names)
+            and sibling_node_names != node_names
+        ):
+            return sibling_node_names
+
+    return None
+
+
 def _get_model_node_names_from_paths(
     trained_job_paths: List[str],
     prefer_pretrained_head_order: bool = True,
@@ -147,6 +185,13 @@ def _get_model_node_names_from_paths(
                     and pretrained_node_names != node_names
                 ):
                     return pretrained_node_names
+
+                sibling_node_names = _get_sibling_model_node_names(
+                    trained_job_path,
+                    node_names,
+                )
+                if sibling_node_names:
+                    return sibling_node_names
 
         return node_names
 

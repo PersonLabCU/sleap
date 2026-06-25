@@ -531,6 +531,134 @@ class TestInferenceResultMerging:
             "thorax",
         ]
 
+    def test_refined_model_uses_earlier_sibling_order_when_head_path_missing(
+        self, tmp_path
+    ):
+        """If pretrained path is unavailable, recover order from earlier sibling."""
+        from sleap.gui.learning.runners import InferenceTask
+
+        models_dir = tmp_path / "models"
+        old_model_dir = models_dir / "260623_201959.single_instance.n=56"
+        refined_model_dir = models_dir / "260624_182242.single_instance.n=21"
+        old_model_dir.mkdir(parents=True)
+        refined_model_dir.mkdir()
+        (old_model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "    - name: abdomen",
+                ]
+            )
+        )
+        (refined_model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: abdomen",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "model_config:",
+                    "  pretrained_head_weights: missing/best.ckpt",
+                ]
+            )
+        )
+
+        project_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        video = Video(filename="video.mp4")
+        project_labels = Labels(videos=[video], skeletons=[project_skeleton])
+        prediction = PredictedInstance.from_numpy(
+            np.asarray([[1, 1], [2, 2], [3, 3]], dtype=np.float64),
+            skeleton=project_skeleton,
+            score=0.9,
+        )
+        prediction_labels = Labels(
+            videos=[video],
+            skeletons=[project_skeleton],
+            labeled_frames=[
+                LabeledFrame(video=video, frame_idx=0, instances=[prediction])
+            ],
+        )
+
+        task = InferenceTask(
+            trained_job_paths=[str(refined_model_dir)],
+            labels=project_labels,
+        )
+        task.add_result_labels(prediction_labels)
+
+        remapped = task.results[0].instances[0]
+        np.testing.assert_array_equal(remapped.points[0]["xy"], [3, 3])
+        np.testing.assert_array_equal(remapped.points[1]["xy"], [1, 1])
+        np.testing.assert_array_equal(remapped.points[2]["xy"], [2, 2])
+
+    def test_sibling_order_is_not_used_without_pretrained_head(self, tmp_path):
+        """From-scratch models should trust their own training config order."""
+        from sleap.gui.learning.runners import InferenceTask
+
+        models_dir = tmp_path / "models"
+        old_model_dir = models_dir / "260623_201959.single_instance.n=56"
+        new_model_dir = models_dir / "260624_182242.single_instance.n=21"
+        old_model_dir.mkdir(parents=True)
+        new_model_dir.mkdir()
+        (old_model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "    - name: abdomen",
+                ]
+            )
+        )
+        (new_model_dir / "training_config.yaml").write_text(
+            "\n".join(
+                [
+                    "data_config:",
+                    "  skeletons:",
+                    "  - nodes:",
+                    "    - name: abdomen",
+                    "    - name: head",
+                    "    - name: thorax",
+                    "model_config:",
+                    "  pretrained_head_weights: null",
+                ]
+            )
+        )
+
+        project_skeleton = Skeleton(["abdomen", "head", "thorax"])
+        video = Video(filename="video.mp4")
+        project_labels = Labels(videos=[video], skeletons=[project_skeleton])
+        prediction = PredictedInstance.from_numpy(
+            np.asarray([[3, 3], [1, 1], [2, 2]], dtype=np.float64),
+            skeleton=project_skeleton,
+            score=0.9,
+        )
+        prediction_labels = Labels(
+            videos=[video],
+            skeletons=[project_skeleton],
+            labeled_frames=[
+                LabeledFrame(video=video, frame_idx=0, instances=[prediction])
+            ],
+        )
+
+        task = InferenceTask(
+            trained_job_paths=[str(new_model_dir)],
+            labels=project_labels,
+        )
+        task.add_result_labels(prediction_labels)
+
+        trusted = task.results[0].instances[0]
+        np.testing.assert_array_equal(trusted.points[0]["xy"], [3, 3])
+        np.testing.assert_array_equal(trusted.points[1]["xy"], [1, 1])
+        np.testing.assert_array_equal(trusted.points[2]["xy"], [2, 2])
+
 
 class TestImportDLCFolderMerge:
     """Tests for ImportDeepLabCutFolder merge functionality."""
