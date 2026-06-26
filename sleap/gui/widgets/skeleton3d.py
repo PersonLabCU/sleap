@@ -85,7 +85,7 @@ class Skeleton3DCanvas(Canvas):
         self.axes.grid(True, alpha=0.25)
         self.draw()
 
-    def draw_empty(self, message: str = "Load a points3D.h5 file") -> None:
+    def draw_empty(self, message: str = "Load a points3d.h5 file") -> None:
         """Draw placeholder text before data is loaded."""
         self.fig.clear()
         self.axes = self.fig.add_subplot(111)

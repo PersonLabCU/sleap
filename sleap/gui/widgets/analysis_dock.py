@@ -453,7 +453,7 @@ class AnalysisDock(DockWidget):
         self._proj_run_btn.setEnabled(False)
         self._proj_run_btn.setToolTip(
             "Triangulate selected prediction files with calibration.toml and save "
-            "points3D.h5 plus reprojections.h5."
+            "points3d.h5 plus reprojections.h5."
         )
         self._proj_run_btn.clicked.connect(self._run_3d_projections)
         layout.addWidget(self._proj_run_btn)
@@ -476,7 +476,7 @@ class AnalysisDock(DockWidget):
 
         points_row = QHBoxLayout()
         self._translate_points_edit = QLineEdit()
-        self._translate_points_edit.setPlaceholderText("points3D.h5")
+        self._translate_points_edit.setPlaceholderText("points3d.h5")
         self._translate_points_edit.textChanged.connect(self._update_translate_btn)
         points_row.addWidget(self._translate_points_edit)
         points_btn = QPushButton("Browse")
@@ -513,7 +513,7 @@ class AnalysisDock(DockWidget):
         self._translate_run_btn = QPushButton("Save Translated 3D Points")
         self._translate_run_btn.setEnabled(False)
         self._translate_run_btn.setToolTip(
-            "Write points3D_translated.h5 with all points translated relative "
+            "Write points3d_translated.h5 with all points translated relative "
             "to the selected node."
         )
         self._translate_run_btn.clicked.connect(self._run_translate_points3d)
@@ -691,7 +691,7 @@ class AnalysisDock(DockWidget):
     def _browse_translate_points3d(self) -> None:
         filename, _ = FileDialog.open(
             self,
-            caption="Select points3D.h5",
+            caption="Select points3d.h5",
             filter="HDF5 Files (*.h5);;All Files (*)",
         )
         if filename:
@@ -1173,10 +1173,15 @@ class AnalysisDock(DockWidget):
         output_dir = self._projection_output_dir()
         if not output_dir:
             return
-        candidate = Path(output_dir) / "points3D.h5"
-        if candidate.exists():
-            self._translate_points_edit.setText(str(candidate))
-            self._load_translate_nodes()
+        candidates = [
+            Path(output_dir) / "points3d.h5",
+            Path(output_dir) / "points3D.h5",
+        ]
+        for candidate in candidates:
+            if candidate.exists():
+                self._translate_points_edit.setText(str(candidate))
+                self._load_translate_nodes()
+                break
 
     def _load_translate_nodes(self) -> None:
         if not hasattr(self, "_translate_node_combo"):
@@ -1186,7 +1191,7 @@ class AnalysisDock(DockWidget):
         self._translate_node_combo.setEnabled(False)
         self._update_translate_btn()
         if not path:
-            self._translate_status("Select a points3D.h5 file.", error=True)
+            self._translate_status("Select a points3d.h5 file.", error=True)
             return
 
         try:
@@ -1194,7 +1199,7 @@ class AnalysisDock(DockWidget):
 
             data = load_points3d_h5(path)
         except Exception as exc:
-            logger.exception("Could not load points3D nodes")
+            logger.exception("Could not load points3d nodes")
             self._translate_status(f"Could not load nodes: {exc}", error=True)
             return
 
@@ -1487,7 +1492,7 @@ class AnalysisDock(DockWidget):
         origin_node = self._translate_node_combo.currentData()
         mode = self._translate_mode_combo.currentData()
         if not points_path or origin_node is None:
-            self._translate_status("Select points3D.h5 and an origin node.", error=True)
+            self._translate_status("Select points3d.h5 and an origin node.", error=True)
             return
 
         try:
@@ -1497,7 +1502,7 @@ class AnalysisDock(DockWidget):
                 points_path,
                 str(origin_node),
                 output_dir=Path(points_path).expanduser().parent,
-                output_filename="points3D_translated.h5",
+                output_filename="points3d_translated.h5",
                 mode=str(mode or "frame"),
                 h5_compression=None,
             )

@@ -241,7 +241,7 @@ class BatchAnalysisWorker(QtCore.QThread):
             prediction_files=prediction_paths,
             calibration_path=self._calibration_path,
             output_dir=session_dir,
-            points3d_filename="3dpoints.h5",
+            points3d_filename="points3d.h5",
             reprojections_filename="reprojections.h5",
             h5_compression=None,
             progress_callback=progress,

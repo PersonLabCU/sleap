@@ -529,7 +529,7 @@ def test_reaches_dock_builds_parameter_traces():
 
 
 def test_translate_points3d_h5_uses_selected_node_as_frame_origin(tmp_path):
-    src = tmp_path / "points3D.h5"
+    src = tmp_path / "points3d.h5"
     points = np.array(
         [
             [[1.0, 2.0, 3.0], [10.0, 20.0, 30.0]],
@@ -548,7 +548,7 @@ def test_translate_points3d_h5_uses_selected_node_as_frame_origin(tmp_path):
     metadata = translate_points3d_h5(src, "bar_R", mode="frame")
 
     out = Path(metadata["points3d_path"])
-    assert out.name == "points3D_translated.h5"
+    assert out.name == "points3d_translated.h5"
     with h5py.File(out, "r") as f:
         translated = f["points3D"][:]
         np.testing.assert_allclose(translated[:, 0], 0.0)
@@ -557,7 +557,7 @@ def test_translate_points3d_h5_uses_selected_node_as_frame_origin(tmp_path):
 
 
 def test_load_points3d_h5_accepts_matlab_tracks_shape(tmp_path):
-    src = tmp_path / "points3D.h5"
+    src = tmp_path / "points3d.h5"
     tracks = np.zeros((3, 2, 1, 4), dtype=np.float64)
     tracks[:, 0, 0, :] = np.asarray(
         [

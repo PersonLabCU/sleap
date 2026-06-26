@@ -16,7 +16,7 @@ def run_3d_projection_export(
     output_dir: str | Path,
     *,
     camera_names: Optional[Sequence[str]] = None,
-    points3d_filename: str = "points3D.h5",
+    points3d_filename: str = "points3d.h5",
     reprojections_filename: str = "reprojections.h5",
     h5_compression: Optional[str] = "lzf",
     progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
@@ -308,11 +308,11 @@ def translate_points3d_h5(
     origin_node: str,
     *,
     output_dir: str | Path | None = None,
-    output_filename: str = "points3D_translated.h5",
+    output_filename: str = "points3d_translated.h5",
     mode: str = "frame",
     h5_compression: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Save a copy of a points3D H5 with coordinates translated to a node origin.
+    """Save a copy of a points3d H5 with coordinates translated to a node origin.
 
     Args:
         path: Source H5 containing ``points3D``.
