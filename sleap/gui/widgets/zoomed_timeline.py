@@ -318,6 +318,9 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._events: List[dict] = []
         self._reaches: List = []  # List[ReachSegment], typed lazily
         self._is_hovering: bool = False
+        self._is_scrubbing: bool = False
+        self._scrub_start_x: float = 0.0
+        self._scrub_start_frame: int = 0
         self._reach_edit_active: bool = False
         self._reach_edit_stage: str = ""
         self._reach_edit_index: int = -1
@@ -755,7 +758,12 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
                 return
             frame = self._x_to_frame(event.pos().x())
             frame = max(0, min(frame, self._total_frames - 1))
+            self._is_scrubbing = True
+            self._scrub_start_x = float(event.pos().x())
+            self._scrub_start_frame = frame
             self._state["frame_idx"] = frame
+            event.accept()
+            return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
@@ -763,6 +771,21 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         x = float(event.pos().x())
         frame = self._x_to_frame(x)
         frame = max(0, min(frame, self._total_frames - 1))
+
+        if self._is_scrubbing and event.buttons() & Qt.LeftButton:
+            frame_delta = round(
+                (x - self._scrub_start_x)
+                * (2 * self._span)
+                / max(self.width(), 1)
+            )
+            frame = max(
+                0,
+                min(
+                    self._scrub_start_frame + frame_delta,
+                    self._total_frames - 1,
+                ),
+            )
+            self._state["frame_idx"] = frame
 
         self._cursor_line.setLine(QLineF(x, 0, x, _H))
         self._cursor_line.show()
@@ -775,6 +798,13 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._cursor_lbl.show()
 
         super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() == Qt.LeftButton and self._is_scrubbing:
+            self._is_scrubbing = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def enterEvent(self, event) -> None:
         self._is_hovering = True
@@ -813,6 +843,7 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._full_redraw()
 
     def _start_reach_edit(self) -> None:
+        self._is_scrubbing = False
         self._reach_edit_active = True
         self._reach_edit_stage = "select"
         self._reach_edit_index = -1
