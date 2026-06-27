@@ -517,6 +517,7 @@ def detect_reaches_kpn(
         start_padding=start_padding,
         min_frame=min_frame,
         max_frame=max_frame,
+        frame_rate=frame_rate,
         confidence=confidence,
         pellet_drop_speed=pellet_drop_speed,
         pellet_drop_dist_z=pellet_drop_dist_z,
@@ -1306,6 +1307,7 @@ def _find_kpn_outward_reaches_fixed_cam(
     start_padding: int,
     min_frame: int,
     max_frame: int,
+    frame_rate: float,
     confidence: float,
     pellet_drop_speed: float,
     pellet_drop_dist_z: float,
@@ -1368,9 +1370,18 @@ def _find_kpn_outward_reaches_fixed_cam(
                         "end_frame": int(end),
                         "dur": int(dur),
                         "result": outcome.name,
+                        "detection_method": "from_pellet",
                         "is_multi_reach": bool(mini_peak_frames),
+                        "first_peak_frame": int(max_fr),
+                        "first_peak_time_s": _frame_time(max_fr, frame_rate),
                         "peak_frames": peak_frames,
+                        "peak_times_s": [
+                            _frame_time(p, frame_rate) for p in peak_frames
+                        ],
                         "mini_peak_frames": mini_peak_frames,
+                        "mini_peak_times_s": [
+                            _frame_time(p, frame_rate) for p in mini_peak_frames
+                        ],
                         "peak_values": [float(v) for v in period["peak_values"]],
                         "min_threshold": float(min_threshold),
                         "max_threshold": float(max_threshold),
