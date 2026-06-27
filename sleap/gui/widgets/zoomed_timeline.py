@@ -299,6 +299,7 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
 
     reachEditRequested = QtCore.Signal(int, int, int, int)
     eventNamesChanged = QtCore.Signal(list)
+    reachesChanged = QtCore.Signal(bool)
 
     TIME_SPANS = [50, 100, 200, 500, 1000, 5000]
     DEFAULT_SPAN = 200
@@ -470,7 +471,25 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         objects.  Pass an empty list to clear all reach bars.
         """
         self._reaches = list(reaches or [])
+        self.reachesChanged.emit(bool(self._reaches))
         self._update_reach_bars()
+
+    def jump_to_reach(self, direction: int) -> bool:
+        """Move the current frame to the previous or next reach start."""
+        frames = sorted(int(reach.frame) for reach in self._reaches)
+        if not frames:
+            return False
+
+        current = int(self._curr_frame)
+        if direction < 0:
+            before = [frame for frame in frames if frame < current]
+            target = before[-1] if before else frames[-1]
+        else:
+            after = [frame for frame in frames if frame > current]
+            target = after[0] if after else frames[0]
+
+        self._state["frame_idx"] = max(0, min(target, self._total_frames - 1))
+        return True
 
     def set_span(self, span: int) -> None:
         """Change the visible half-window (±span frames around current frame)."""

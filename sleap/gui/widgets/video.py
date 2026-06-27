@@ -350,6 +350,38 @@ class QtVideoPlayer(QWidget):
         )
         _tl_header_layout.addWidget(self._tl_next_event_btn)
 
+        self._tl_reach_nav = QtWidgets.QWidget()
+        _reach_nav_layout = QtWidgets.QHBoxLayout(self._tl_reach_nav)
+        _reach_nav_layout.setContentsMargins(4, 0, 0, 0)
+        _reach_nav_layout.setSpacing(4)
+
+        _reach_label = QtWidgets.QLabel("Reach")
+        _reach_label.setStyleSheet("color: #9ca3af; font-size: 10px;")
+        _reach_nav_layout.addWidget(_reach_label)
+
+        self._tl_prev_reach_btn = QtWidgets.QToolButton()
+        self._tl_prev_reach_btn.setText("<")
+        self._tl_prev_reach_btn.setFixedSize(22, 20)
+        self._tl_prev_reach_btn.setStyleSheet(_event_button_style)
+        self._tl_prev_reach_btn.setToolTip("Previous detected reach")
+        self._tl_prev_reach_btn.clicked.connect(
+            lambda: self.zoomed_timeline.jump_to_reach(-1)
+        )
+        _reach_nav_layout.addWidget(self._tl_prev_reach_btn)
+
+        self._tl_next_reach_btn = QtWidgets.QToolButton()
+        self._tl_next_reach_btn.setText(">")
+        self._tl_next_reach_btn.setFixedSize(22, 20)
+        self._tl_next_reach_btn.setStyleSheet(_event_button_style)
+        self._tl_next_reach_btn.setToolTip("Next detected reach")
+        self._tl_next_reach_btn.clicked.connect(
+            lambda: self.zoomed_timeline.jump_to_reach(1)
+        )
+        _reach_nav_layout.addWidget(self._tl_next_reach_btn)
+
+        self._tl_reach_nav.hide()
+        _tl_header_layout.addWidget(self._tl_reach_nav)
+
         _span_label = QtWidgets.QLabel("±")
         _span_label.setStyleSheet("color: #6b7280; font-size: 10px;")
         _tl_header_layout.addWidget(_span_label)
@@ -374,6 +406,7 @@ class QtVideoPlayer(QWidget):
         self.zoomed_timeline.eventNamesChanged.connect(
             self._set_timeline_event_names
         )
+        self.zoomed_timeline.reachesChanged.connect(self._tl_reach_nav.setVisible)
         self._set_timeline_event_names([])
 
         # Container widget holding header + timeline
