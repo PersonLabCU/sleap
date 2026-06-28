@@ -372,9 +372,15 @@ class Skeleton3DWidget(QtWidgets.QWidget):
             raise ValueError(f"Expected points with shape frames x nodes x 3, got {points.shape}.")
 
         self._path = Path(filename)
-        self._points = points
-        self._node_names = self._display_node_names(list(loaded["node_names"]))
-        self._edges, self._edge_source = self._load_edges(len(self._node_names))
+        h5_node_names = list(loaded["node_names"])
+        (
+            self._node_names,
+            node_indices,
+            missing_nodes,
+            mapping_note,
+        ) = self._project_node_mapping(h5_node_names)
+        self._points = points[:, node_indices, :]
+        self._edges, self._edge_source = self._load_edges(self._node_names)
         self.path_edit.setText(str(self._path))
         self._populate_node_controls()
 
@@ -392,9 +398,15 @@ class Skeleton3DWidget(QtWidgets.QWidget):
             if self._edges
             else "no matching edges"
         )
+        missing_note = (
+            f" Missing project node(s) in file: {', '.join(missing_nodes)}."
+            if missing_nodes
+            else ""
+        )
         self.status_label.setText(
             f"Loaded {self._path.name}: {points.shape[0]} frame(s), "
-            f"{points.shape[1]} node(s), {edge_note}."
+            f"{len(self._node_names)}/{points.shape[1]} project node(s), "
+            f"{edge_note}.{missing_note}{mapping_note}"
         )
 
     def set_frame(self, frame_idx: int) -> None:
@@ -436,41 +448,83 @@ class Skeleton3DWidget(QtWidgets.QWidget):
                 return lowered[name.casefold()]
         return None
 
-    def _display_node_names(self, h5_node_names: List[str]) -> List[str]:
+    def _project_node_mapping(
+        self, h5_node_names: List[str]
+    ) -> Tuple[List[str], List[int], List[str], str]:
+        """Return project node names and matching H5 indices to plot."""
         skeleton = self._project_skeleton()
         project_names = list(getattr(skeleton, "node_names", []) or [])
+        if not project_names:
+            return h5_node_names, list(range(len(h5_node_names))), [], ""
+
         is_generic = all(
             name == f"node_{idx}" for idx, name in enumerate(h5_node_names)
         )
-        if is_generic and len(project_names) == len(h5_node_names):
-            return project_names
-        return h5_node_names
+        if is_generic:
+            n_nodes = min(len(project_names), len(h5_node_names))
+            return (
+                project_names[:n_nodes],
+                list(range(n_nodes)),
+                project_names[n_nodes:],
+                "",
+            )
+
+        h5_name_to_idx = {name.casefold(): idx for idx, name in enumerate(h5_node_names)}
+        node_names = []
+        node_indices = []
+        missing_nodes = []
+        for name in project_names:
+            if name.casefold() in h5_name_to_idx:
+                node_names.append(name)
+                node_indices.append(h5_name_to_idx[name.casefold()])
+            else:
+                missing_nodes.append(name)
+
+        if node_indices:
+            return node_names, node_indices, missing_nodes, ""
+
+        n_nodes = min(len(project_names), len(h5_node_names))
+        return (
+            project_names[:n_nodes],
+            list(range(n_nodes)),
+            project_names[n_nodes:],
+            " H5 node names did not match the project, so nodes were mapped by order.",
+        )
 
     def _project_skeleton(self):
         if self.main_window is None:
             return None
         return self.main_window.state.get("skeleton", default=None)
 
-    def _project_skeleton_edges(self, n_nodes: int) -> List[Tuple[int, int]]:
+    def _project_skeleton_edges(
+        self, node_names: Sequence[str]
+    ) -> List[Tuple[int, int]]:
         skeleton = self._project_skeleton()
+        project_names = list(getattr(skeleton, "node_names", []) or [])
         edge_inds = list(getattr(skeleton, "edge_inds", []) or [])
+        plot_node_index = {name: idx for idx, name in enumerate(node_names)}
         edges = []
         for src, dst in edge_inds:
-            if 0 <= int(src) < n_nodes and 0 <= int(dst) < n_nodes:
-                edges.append((int(src), int(dst)))
+            src = int(src)
+            dst = int(dst)
+            if (
+                src < 0
+                or dst < 0
+                or src >= len(project_names)
+                or dst >= len(project_names)
+            ):
+                continue
+            src_name = project_names[src]
+            dst_name = project_names[dst]
+            if src_name in plot_node_index and dst_name in plot_node_index:
+                edges.append((plot_node_index[src_name], plot_node_index[dst_name]))
         return edges
 
-    def _load_edges(self, n_nodes: int) -> Tuple[List[Tuple[int, int]], str]:
-        """Return project skeleton edges or a points3D node-order fallback."""
-        project_edges = self._project_skeleton_edges(n_nodes)
-        if project_edges:
-            return project_edges, "project skeleton"
-
-        fallback_edges = _default_points3d_edges(n_nodes)
-        if fallback_edges:
-            return fallback_edges, "points3D node order"
-
-        return [], ""
+    def _load_edges(
+        self, node_names: Sequence[str]
+    ) -> Tuple[List[Tuple[int, int]], str]:
+        """Return only project skeleton edges that match the plotted nodes."""
+        return self._project_skeleton_edges(node_names), "project skeleton"
 
     def _update_transform(self, *args) -> None:
         if self._points is None:
@@ -690,38 +744,3 @@ def _default_axis_view(view_mode: str) -> Optional[dict]:
     view["xlim"] = (float(lo[x_dim]), float(hi[x_dim]))
     view["ylim"] = (float(lo[y_dim]), float(hi[y_dim]))
     return view
-
-
-def _default_points3d_edges(n_nodes: int) -> List[Tuple[int, int]]:
-    """Fallback edges for MATLAB-style hand/bar points3D node order."""
-    candidate_edges = [
-        # Hand: wrist to MCP/PIP/DIP/tip chains. Indices are zero-based.
-        (0, 1),
-        (1, 6),
-        (6, 11),
-        (0, 2),
-        (2, 7),
-        (7, 12),
-        (12, 16),
-        (0, 3),
-        (3, 8),
-        (8, 13),
-        (13, 17),
-        (0, 4),
-        (4, 9),
-        (9, 14),
-        (14, 18),
-        (0, 5),
-        (5, 10),
-        (10, 15),
-        (15, 19),
-        # Pellet/reaching apparatus landmarks from the MATLAB plotting reference.
-        (51, 52),
-        (45, 53),
-        (45, 54),
-    ]
-    return [
-        (src, dst)
-        for src, dst in candidate_edges
-        if src < n_nodes and dst < n_nodes
-    ]

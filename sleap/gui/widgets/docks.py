@@ -4,7 +4,7 @@ import base64
 from io import BytesIO
 import json
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Type, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Type, Union
 
 from qtpy import QtGui
 from qtpy.QtCore import Qt
@@ -1720,6 +1720,29 @@ class ReachesDock(DockWidget):
         ):
             return "absolute"
         return "from_pellet"
+
+    def batch_detection_settings(self) -> Dict[str, Any]:
+        """Return the current reach-detection settings for batch analysis."""
+        return {
+            "left_hand_nodes": self._selected_lh_nodes(),
+            "right_hand_nodes": self._selected_rh_nodes(),
+            "method": self._detection_method(),
+            "kpn_outward_threshold": float(self._min_thresh.value()),
+            "kpn_outward_max_threshold": float(self._max_thresh.value()),
+            "kpn_peak_prominence": float(self._prominence.value()),
+            "kpn_min_outward_travel": float(self._min_travel.value()),
+            "kpn_start_padding": int(self._start_padding.value()),
+            "min_frame": int(self._min_frames.value()),
+            "max_frame": int(self._max_frames.value()),
+            "max_dist_from_home": float(self._max_dist_home.value()),
+            "point_confidence_threshold": float(self._point_confidence.value()),
+            "absolute_axis": int(self._absolute_axis_combo.currentData()),
+            "absolute_axis_name": str(self._absolute_axis_combo.currentText()).lower(),
+            "absolute_invert": bool(self._absolute_invert.isChecked()),
+            "absolute_max_start_value": float(self._absolute_max_start.value()),
+            "filter_hand_traces": bool(self._filter_hand_traces.isChecked()),
+            "filter_cutoff_frequency_hz": float(self._filter_cutoff.value()),
+        }
 
     def _update_detection_method_controls(self) -> None:
         if not hasattr(self, "_max_thresh"):

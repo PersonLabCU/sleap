@@ -2088,7 +2088,15 @@ class MainWindow(QMainWindow):
 
     def _show_user_controls_window(self):
         """Show GUI controls, hot keys, and shortcuts."""
-        UserControlsDialog(shortcuts=self.shortcuts, menu_bar=self.menuBar()).exec_()
+        # Avoid passing the live menu bar. In PySide6, walking QMenu submenus from
+        # another dialog can invalidate the existing QMenu wrappers used by the GUI.
+        dialog = self._child_windows.get("user_controls")
+        if dialog is None:
+            dialog = UserControlsDialog(shortcuts=self.shortcuts, parent=self)
+            self._child_windows["user_controls"] = dialog
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _show_update_checker_dialog(self):
         """Shows the update checker dialog."""

@@ -149,6 +149,7 @@ class UserControlsDialog(QtWidgets.QDialog):
         self.shortcuts = shortcuts or Shortcuts()
         self.menu_bar = menu_bar
         self.setWindowTitle("User Controls")
+        self.setModal(False)
         self.resize(780, 680)
         self.make_form()
 
@@ -162,7 +163,7 @@ class UserControlsDialog(QtWidgets.QDialog):
         layout.addWidget(browser)
 
         buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Close)
-        buttons.rejected.connect(self.reject)
+        buttons.rejected.connect(self.close)
         layout.addWidget(buttons)
 
         self.setLayout(layout)
