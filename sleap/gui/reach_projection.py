@@ -2,12 +2,29 @@
 
 from __future__ import annotations
 
+import gc
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+import uuid
 
 import numpy as np
+
+
+def _close_open_h5_file(path: Path, h5py) -> None:
+    """Close live h5py readers for an output file that will be replaced."""
+    target = os.path.normcase(os.path.abspath(os.fspath(path)))
+    for obj in gc.get_objects():
+        try:
+            if not isinstance(obj, h5py.File) or not obj.id.valid:
+                continue
+            filename = os.fsdecode(obj.filename)
+            if os.path.normcase(os.path.abspath(filename)) == target:
+                obj.close()
+        except (AttributeError, OSError, TypeError, ValueError):
+            continue
 
 
 def run_3d_projection_export(
@@ -211,49 +228,79 @@ def run_3d_projection_export(
 
     str_dtype = h5py.string_dtype(encoding="utf-8")
     compression_kwargs = {"compression": h5_compression} if h5_compression else {}
-    with h5py.File(points3d_path, "w") as f:
-        f.create_dataset("points3D", data=points3d, **compression_kwargs)
-        f.create_dataset("node_names", data=np.asarray(node_names, dtype=object), dtype=str_dtype)
-        f.create_dataset("frame_indices", data=np.arange(n_frames, dtype=np.int64))
-        f.create_dataset(
-            "source_files",
-            data=np.asarray([str(p) for p in prediction_files], dtype=object),
-            dtype=str_dtype,
-        )
-        f.create_dataset(
-            "camera_names",
-            data=np.asarray(list(used_camera_names), dtype=object),
-            dtype=str_dtype,
-        )
-        f.attrs["metadata_json"] = json.dumps(metadata)
+    points3d_temp_path = points3d_path.with_name(
+        f".{points3d_path.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with h5py.File(points3d_temp_path, "w") as f:
+            f.create_dataset("points3D", data=points3d, **compression_kwargs)
+            f.create_dataset(
+                "node_names",
+                data=np.asarray(node_names, dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset("frame_indices", data=np.arange(n_frames, dtype=np.int64))
+            f.create_dataset(
+                "source_files",
+                data=np.asarray([str(p) for p in prediction_files], dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset(
+                "camera_names",
+                data=np.asarray(list(used_camera_names), dtype=object),
+                dtype=str_dtype,
+            )
+            f.attrs["metadata_json"] = json.dumps(metadata)
+        _close_open_h5_file(points3d_path, h5py)
+        points3d_temp_path.replace(points3d_path)
+    finally:
+        if points3d_temp_path.exists():
+            points3d_temp_path.unlink()
     report("Writing outputs", 1, 2, points3d_path.name)
 
-    with h5py.File(reproj_path, "w") as f:
-        f.create_dataset("reprojections", data=reprojections, **compression_kwargs)
-        f.create_dataset("input_points2D", data=points2d, **compression_kwargs)
-        f.create_dataset(
-            "point_scores",
-            data=_scores_for_reprojection_cameras(
-                scores,
-                n_reprojection_views,
-                input_to_reprojection,
-            ),
-            **compression_kwargs,
-        )
-        f.create_dataset("reprojection_error", data=reprojection_error, **compression_kwargs)
-        f.create_dataset("node_names", data=np.asarray(node_names, dtype=object), dtype=str_dtype)
-        f.create_dataset(
-            "camera_names",
-            data=np.asarray(list(reprojection_camera_names), dtype=object),
-            dtype=str_dtype,
-        )
-        f.create_dataset(
-            "source_files",
-            data=np.asarray([str(p) for p in prediction_files], dtype=object),
-            dtype=str_dtype,
-        )
-        f.create_dataset("frame_indices", data=np.arange(n_frames, dtype=np.int64))
-        f.attrs["metadata_json"] = json.dumps(metadata)
+    reproj_temp_path = reproj_path.with_name(
+        f".{reproj_path.name}.{uuid.uuid4().hex}.tmp"
+    )
+    try:
+        with h5py.File(reproj_temp_path, "w") as f:
+            f.create_dataset("reprojections", data=reprojections, **compression_kwargs)
+            f.create_dataset("input_points2D", data=points2d, **compression_kwargs)
+            f.create_dataset(
+                "point_scores",
+                data=_scores_for_reprojection_cameras(
+                    scores,
+                    n_reprojection_views,
+                    input_to_reprojection,
+                ),
+                **compression_kwargs,
+            )
+            f.create_dataset(
+                "reprojection_error",
+                data=reprojection_error,
+                **compression_kwargs,
+            )
+            f.create_dataset(
+                "node_names",
+                data=np.asarray(node_names, dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset(
+                "camera_names",
+                data=np.asarray(list(reprojection_camera_names), dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset(
+                "source_files",
+                data=np.asarray([str(p) for p in prediction_files], dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset("frame_indices", data=np.arange(n_frames, dtype=np.int64))
+            f.attrs["metadata_json"] = json.dumps(metadata)
+        _close_open_h5_file(reproj_path, h5py)
+        reproj_temp_path.replace(reproj_path)
+    finally:
+        if reproj_temp_path.exists():
+            reproj_temp_path.unlink()
     report("Writing outputs", 2, 2, reproj_path.name)
 
     report("Complete", 1, 1, "3D projection export complete.")

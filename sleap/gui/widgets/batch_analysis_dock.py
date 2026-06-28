@@ -212,6 +212,11 @@ class BatchAnalysisWorker(QtCore.QThread):
                                 n_reaches = self._run_reach_detection(
                                     session_dir,
                                     points3d_path=points3d_path,
+                                    source_video_path=(
+                                        prediction_items[0][0]
+                                        if prediction_items
+                                        else None
+                                    ),
                                 )
                         except InterruptedError:
                             raise
@@ -400,6 +405,9 @@ class BatchAnalysisWorker(QtCore.QThread):
         source_video_filename = ""
         coordinate_system = "3d_calibration_mm"
         if points3d_path is not None:
+            if source_video_path is not None:
+                source_video = Video.from_filename(str(source_video_path))
+                source_video_filename = str(source_video_path)
             source = load_points3d_h5(points3d_path)
             node_names = list(source.get("node_names", []))
             points3d = source.get("points3d")
