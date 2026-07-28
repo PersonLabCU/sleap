@@ -337,6 +337,31 @@ class TestValidation:
         """Message widget should exist for validation messages."""
         assert training_dialog.message_widget is not None
 
+    def test_message_widget_hidden_when_no_message(self, training_dialog):
+        """Message widget should be hidden when there is nothing to report."""
+        training_dialog.set_pipeline("single")
+        training_dialog._validate_pipeline()
+        assert training_dialog.message_widget.text() == ""
+        # isHidden() reflects the explicit visibility flag regardless of whether
+        # the (un-shown) dialog's ancestors are visible in the test.
+        assert training_dialog.message_widget.isHidden() is True
+
+    def test_message_widget_shown_when_warning_present(self, training_dialog):
+        """Crop-size warnings should make the message widget visible.
+
+        Regression test for #2792: the warning text was being set but the widget
+        lived below the (scrollable) tab content, so it was effectively invisible.
+        """
+        training_dialog.set_pipeline("top-down")
+        ci_tab = training_dialog.tabs["centered_instance"]
+        with patch.object(
+            ci_tab, "get_config_warnings", return_value=["something is off"]
+        ):
+            training_dialog._validate_pipeline()
+
+        assert "something is off" in training_dialog.message_widget.text()
+        assert training_dialog.message_widget.isHidden() is False
+
 
 # =============================================================================
 # Signal Connection Tests
@@ -517,6 +542,39 @@ class TestTrainingEditorWidget:
         with qtbot.waitSignal(editor_widget.valueChanged, timeout=1000):
             editor_widget.emitValueChanged()
 
+    def test_load_config_strips_system_specific_keys(self, editor_widget):
+        """`_load_config` should not carry machine-specific settings over from a
+        saved profile (#accelerator-staleness): trainer_devices, num_workers, and
+        trainer_accelerator should all come from the current machine's
+        preferences/defaults, not from whatever machine the profile was saved on.
+
+        Reproduces the reported bug: a profile trained on a Mac
+        (`trainer_accelerator: mps`) should not silently populate the accelerator
+        field with `"mps"` when reloaded on a different machine (e.g. Linux+CUDA),
+        where that accelerator may not even exist.
+        """
+        from omegaconf import OmegaConf
+        from sleap.gui.learning.configs import ConfigFileInfo
+
+        saved_cfg = OmegaConf.create(
+            {
+                "trainer_config": {
+                    "trainer_accelerator": "mps",
+                    "trainer_devices": 2,
+                    "train_data_loader": {"num_workers": 4},
+                }
+            }
+        )
+        cfg_info = ConfigFileInfo(config=saved_cfg)
+
+        with patch.object(editor_widget, "set_fields_from_key_val_dict") as mock_set:
+            editor_widget._load_config(cfg_info)
+
+        applied_dict = mock_set.call_args[0][0]
+        assert "trainer_config.trainer_accelerator" not in applied_dict
+        assert "trainer_config.trainer_devices" not in applied_dict
+        assert "trainer_config.train_data_loader.num_workers" not in applied_dict
+
     @pytest.fixture
     def inference_editor_widget(self, qtbot, minimal_skeleton, mock_cfg_getter):
         """Create a TrainingEditorWidget for inference (require_trained=True)."""
@@ -535,6 +593,164 @@ class TestTrainingEditorWidget:
         assert inference_editor_widget._radio_train_scratch is None
         assert inference_editor_widget._radio_resume is None
         assert inference_editor_widget._radio_use_trained is None
+
+
+# =============================================================================
+# Training Config Warning Tests (#2792)
+# =============================================================================
+
+
+class TestTrainingConfigWarnings:
+    """Tests for crop-size / input-scaling UX guidance (issue #2792)."""
+
+    def _make_editor(self, qtbot, skeleton, cfg_getter, head, labels=None):
+        widget = TrainingEditorWidget(
+            skeleton=skeleton,
+            head=head,
+            cfg_getter=cfg_getter,
+            require_trained=False,
+            labels=labels,
+        )
+        qtbot.addWidget(widget)
+        return widget
+
+    def test_input_scaling_info_button_on_centered_instance(
+        self, qtbot, minimal_skeleton, mock_cfg_getter
+    ):
+        """Centered instance tab gets an info button next to Input Scaling."""
+        from qtpy import QtWidgets
+
+        widget = self._make_editor(
+            qtbot, minimal_skeleton, mock_cfg_getter, "centered_instance"
+        )
+        buttons = widget.form_widgets["data"].findChildren(QtWidgets.QToolButton)
+        assert len(buttons) == 1
+
+    def test_no_info_button_on_single_instance(
+        self, qtbot, minimal_skeleton, mock_cfg_getter
+    ):
+        """Non-crop heads do not get the Input Scaling info button."""
+        from qtpy import QtWidgets
+
+        widget = self._make_editor(
+            qtbot, minimal_skeleton, mock_cfg_getter, "single_instance"
+        )
+        buttons = widget.form_widgets["data"].findChildren(QtWidgets.QToolButton)
+        assert len(buttons) == 0
+
+    def test_warnings_empty_for_non_crop_head(
+        self, qtbot, minimal_skeleton, mock_cfg_getter, minimal_labels
+    ):
+        """Non-crop heads never produce crop-size warnings."""
+        widget = self._make_editor(
+            qtbot,
+            minimal_skeleton,
+            mock_cfg_getter,
+            "single_instance",
+            labels=minimal_labels,
+        )
+        assert widget.get_config_warnings() == []
+
+    def test_warnings_empty_without_labels(
+        self, qtbot, minimal_skeleton, mock_cfg_getter
+    ):
+        """No labels means no instance-based warnings can be computed."""
+        widget = self._make_editor(
+            qtbot, minimal_skeleton, mock_cfg_getter, "centered_instance"
+        )
+        assert widget._labels is None
+        assert widget.get_config_warnings() == []
+
+    def test_warning_when_effective_crop_below_100px(
+        self, qtbot, minimal_skeleton, mock_cfg_getter, minimal_labels
+    ):
+        """Effective (post-scale) crop < 100px warns to use scale 1.0 + Auto."""
+        widget = self._make_editor(
+            qtbot,
+            minimal_skeleton,
+            mock_cfg_getter,
+            "centered_instance",
+            labels=minimal_labels,
+        )
+        with patch(
+            "sleap.gui.learning.dialog.receptivefield.compute_crop_size_from_cfg",
+            return_value=64,
+        ):
+            warnings = widget.get_config_warnings()
+
+        assert any("100px" in w and "Input Scaling" in w for w in warnings)
+
+    def test_no_warning_when_effective_crop_at_or_above_100px(
+        self, qtbot, minimal_skeleton, mock_cfg_getter, minimal_labels
+    ):
+        """Effective crop >= 100px (and Auto crop) produces no warnings."""
+        widget = self._make_editor(
+            qtbot,
+            minimal_skeleton,
+            mock_cfg_getter,
+            "centered_instance",
+            labels=minimal_labels,
+        )
+        with patch(
+            "sleap.gui.learning.dialog.receptivefield.compute_crop_size_from_cfg",
+            return_value=256,
+        ):
+            warnings = widget.get_config_warnings()
+
+        # crop_size is Auto (None) by default, so no clipping warning either.
+        assert warnings == []
+
+    def test_warning_when_crop_smaller_than_largest_instance(
+        self, qtbot, minimal_skeleton, mock_cfg_getter, minimal_labels
+    ):
+        """Explicit crop smaller than the largest instance warns about clipping."""
+        from omegaconf import OmegaConf
+
+        widget = self._make_editor(
+            qtbot,
+            minimal_skeleton,
+            mock_cfg_getter,
+            "centered_instance",
+            labels=minimal_labels,
+        )
+        # Pretend the largest labeled instance spans 500px.
+        widget._max_instance_bbox_size = 500.0
+
+        data_cfg = OmegaConf.create(
+            {"data_config": {"preprocessing": {"crop_size": 64, "scale": 1.0}}}
+        )
+        with patch(
+            "sleap.gui.learning.dialog.get_omegaconf_from_gui_form",
+            return_value=data_cfg,
+        ), patch(
+            "sleap.gui.learning.dialog.receptivefield.compute_crop_size_from_cfg",
+            return_value=64,  # below 100 too, but we assert on the clipping message
+        ):
+            warnings = widget.get_config_warnings()
+
+        assert any("clipped" in w and "64px" in w and "500px" in w for w in warnings)
+
+    def test_max_instance_bbox_size_is_cached(
+        self, qtbot, minimal_skeleton, mock_cfg_getter, minimal_labels
+    ):
+        """The largest-instance scan is computed once and cached."""
+        widget = self._make_editor(
+            qtbot,
+            minimal_skeleton,
+            mock_cfg_getter,
+            "centered_instance",
+            labels=minimal_labels,
+        )
+        with patch(
+            "sleap.gui.learning.dialog.receptivefield.find_max_instance_bbox_size",
+            return_value=123.0,
+        ) as mock_scan:
+            first = widget._get_max_instance_bbox_size()
+            second = widget._get_max_instance_bbox_size()
+
+        assert first == 123.0
+        assert second == 123.0
+        assert mock_scan.call_count == 1
 
 
 # =============================================================================
@@ -710,3 +926,76 @@ class TestDialogSize:
         size = inference_dialog.size()
         assert size.width() > 0
         assert size.height() > 0
+
+
+class TestNegativeFrames:
+    """Tests for the negative-frame training options."""
+
+    def _data_form(self, training_dialog, head):
+        """Add a tab for `head` and return its data form widget."""
+        training_dialog.remove_tabs()
+        training_dialog.tabs.clear()
+        training_dialog.add_tab(head)
+        return training_dialog.tabs[head].form_widgets["data"]
+
+    def test_fields_present_on_supported_head(self, training_dialog):
+        """Both negative-frame fields exist on a supported head."""
+        data_form = self._data_form(training_dialog, "single_instance")
+        assert data_form.fields.get("data_config.use_negative_frames") is not None
+        assert data_form.fields.get("data_config.negative_loss_weight") is not None
+
+    def test_fields_visible_on_supported_head(self, training_dialog):
+        """Negative-frame fields are visible on heads that use them."""
+        data_form = self._data_form(training_dialog, "bottomup")
+        use_field = data_form.fields.get("data_config.use_negative_frames")
+        weight_field = data_form.fields.get("data_config.negative_loss_weight")
+        assert not use_field.isHidden()
+        assert not weight_field.isHidden()
+
+    def test_fields_hidden_on_centered_instance(self, training_dialog):
+        """Negative-frame fields are hidden for centered-instance models."""
+        data_form = self._data_form(training_dialog, "centered_instance")
+        use_field = data_form.fields.get("data_config.use_negative_frames")
+        weight_field = data_form.fields.get("data_config.negative_loss_weight")
+        assert use_field.isHidden()
+        assert weight_field.isHidden()
+
+    def test_fields_hidden_on_multi_class_topdown(self, training_dialog):
+        """Negative-frame fields are hidden for top-down-ID models."""
+        data_form = self._data_form(training_dialog, "multi_class_topdown")
+        use_field = data_form.fields.get("data_config.use_negative_frames")
+        assert use_field.isHidden()
+
+    def test_weight_field_gated_by_checkbox(self, training_dialog):
+        """The negative loss weight field is enabled only when negatives are on."""
+        data_form = self._data_form(training_dialog, "single_instance")
+        use_field = data_form.fields.get("data_config.use_negative_frames")
+        weight_field = data_form.fields.get("data_config.negative_loss_weight")
+
+        # Disabled by default (checkbox off).
+        assert not weight_field.isEnabled()
+
+        use_field.setChecked(True)
+        assert weight_field.isEnabled()
+
+        use_field.setChecked(False)
+        assert not weight_field.isEnabled()
+
+    def test_form_data_uses_config_paths(self, training_dialog):
+        """The fields round-trip to their sleap-nn config paths."""
+        self._data_form(training_dialog, "single_instance")
+        data = training_dialog.tabs["single_instance"].get_all_form_data()
+        assert "data_config.use_negative_frames" in data
+        assert "data_config.negative_loss_weight" in data
+
+    def test_launch_warning_when_no_negative_frames(self, training_dialog):
+        """Enabling negatives with none marked surfaces a warning banner."""
+        training_dialog.set_pipeline("single")
+        tab_name = training_dialog.shown_tab_names[0]
+        data_form = training_dialog.tabs[tab_name].form_widgets["data"]
+        use_field = data_form.fields.get("data_config.use_negative_frames")
+
+        use_field.setChecked(True)
+        training_dialog._validate_pipeline()
+
+        assert "negative" in training_dialog.message_widget.text().lower()

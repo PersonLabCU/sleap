@@ -4,6 +4,7 @@ from sleap.gui.widgets.slider import (
     set_slider_marks_from_labels,
 )
 from sleap_io import LabeledFrame, Labels, Video
+from qtpy import QtCore, QtGui, QtWidgets
 import pytest
 
 
@@ -55,6 +56,24 @@ def test_find_labeled_frame_for_tooltip_uses_last_duplicate():
 
     assert _find_labeled_frame_for_tooltip(labels, video, 10) is last
     assert labels._frame_index is None
+
+
+def test_slider_negative_frame_mark(qtbot, centered_pair_predictions):
+    """A negative frame produces a `negative`-type seekbar mark."""
+    labels = centered_pair_predictions
+    video = labels.videos[0]
+
+    # Mark an existing labeled frame as negative.
+    lf = labels.find(video)[0]
+    lf.instances = []
+    lf.is_negative = True
+
+    slider = VideoSlider(min=0, max=1200, val=0)
+    set_slider_marks_from_labels(slider, labels, video)
+
+    negative_marks = slider.getMarks("negative")
+    assert len(negative_marks) == 1
+    assert negative_marks[0].val == lf.frame_idx
 
 
 @pytest.mark.parametrize(
@@ -178,3 +197,41 @@ def test_toVal_invalid_input(qtbot, invalid_value, expected_error_msg):
 
     # Verify the exact error message
     assert str(excinfo.value) == expected_error_msg
+
+
+def test_slider_tooltip_has_parent_widget(qtbot, monkeypatch):
+    """Hover tooltip is shown with the slider as its parent widget.
+
+    Without a parent widget, ``QToolTip.showText`` produces a popup with no
+    ``transientParent``, which Wayland refuses to create and floods stderr with
+    warnings (see #2779).
+    """
+    slider = VideoSlider(min=0, max=100, val=0)
+    qtbot.addWidget(slider)
+    slider.setTooltipCallable(lambda val: f"frame {val}")
+
+    calls = []
+    monkeypatch.setattr(
+        QtWidgets.QToolTip,
+        "showText",
+        lambda *args, **kwargs: calls.append(args),
+    )
+
+    event = QtGui.QMouseEvent(
+        QtCore.QEvent.MouseMove,
+        QtCore.QPointF(10, 5),
+        QtCore.Qt.NoButton,
+        QtCore.Qt.NoButton,
+        QtCore.Qt.NoModifier,
+    )
+    slider.mouseMoveEvent(event)
+
+    # The tooltip must be shown with the slider as the parent widget (3rd arg)
+    # so the popup has a transientParent on Wayland.
+    assert len(calls) == 1
+    args = calls[0]
+    assert len(args) >= 3, (
+        "tooltip shown without a parent widget; the popup will lack a "
+        "transientParent and Wayland will fail to create it (see #2779)"
+    )
+    assert args[2] is slider

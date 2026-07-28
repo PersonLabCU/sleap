@@ -118,9 +118,19 @@ from sleap.gui.dialogs.shortcuts import ShortcutDialog
 from sleap.gui.dialogs.user_controls import UserControlsDialog
 from sleap.gui.session_events import event_color_map, get_video_session_events
 from sleap.gui.overlays.instance import InstanceOverlay
+from sleap.gui.overlays.negative_frame import NegativeFrameOverlay
 from sleap.gui.overlays.tracks import TrackListOverlay, TrackTrailOverlay
 from sleap.gui.shortcuts import Shortcuts
-from sleap.gui.state import GuiState
+from sleap.gui.state import (
+    GuiState,
+    INSTANCE_HIDDEN_KEY,
+    VIEW_ONLY_INSTANCE_KEY,
+    SHOW_NONVISIBLE_OVERRIDE_KEY,
+    QC_DISPLAY_MODE_KEY,
+    QC_MODE_MANUAL,
+    QC_MODE_CHOICES,
+    compute_qc_visibility,
+)
 from sleap.gui.web import ping_analytics
 from sleap.gui.widgets.analysis_dock import AnalysisDock
 from sleap.gui.widgets.batch_analysis_dock import BatchAnalysisDock
@@ -252,17 +262,38 @@ class MainWindow(QMainWindow):
         self.state["show instances"] = True
         self.state["show labels"] = True
         self.state["show edges"] = True
+        # Transient per-instance canvas visibility (Instances dock checkboxes:
+        # hidden set, view-only instance, and per-instance "show non-visible
+        # nodes" override). Reset on each real frame change in
+        # `_after_plot_change`; never persisted.
+        self.state[INSTANCE_HIDDEN_KEY] = set()
+        self.state[VIEW_ONLY_INSTANCE_KEY] = None
+        self.state[SHOW_NONVISIBLE_OVERRIDE_KEY] = {}
+        # Label QC "display mode" (#2783): a transient, session-only review aid.
+        # It always starts in "manual" (normal view) and is intentionally NOT
+        # persisted across launches -- a selection-relative mode that hides
+        # instances would look like a bug on the next startup. "manual" keeps the
+        # Instances-dock columns in control; other modes drive the transient keys
+        # above. Not reset on frame change (the mode persists within a session).
+        self.state[QC_DISPLAY_MODE_KEY] = QC_MODE_MANUAL
+        # (video, frame_idx) of the last plotted frame, so `_after_plot_change`
+        # clears the transient visibility above only when the frame truly changes
+        # (not on same-frame replots like marker-size or add-instance).
+        self._vis_last_frame_key = None
         self.state["edge style"] = prefs["edge style"]
         self.state["fit"] = False
         self.state["fit_selection"] = False
+        self.state["actual_size"] = False
         self.state["color predicted"] = prefs["color predicted"]
         self.state["trail_length"] = prefs["trail length"]
-        self.state["trail_shade"] = prefs["trail shade"]
+        self.state["trail_node"] = prefs["trail node"]
+        self.state["trail_alpha"] = prefs["trail alpha"]
+        self.state["trail_alpha_fade"] = prefs["trail alpha fade"]
         self.state["marker size"] = prefs["marker size"]
         self.state["propagate track labels"] = prefs["propagate track labels"]
         self.state["node label size"] = prefs["node label size"]
         self.state["share usage data"] = prefs["share usage data"]
-        self.state["debug mode"] = False
+        self.state["experimental features"] = False
         self.state["skeleton_preview_image"] = None
         self.state["skeleton_description"] = "No skeleton loaded yet"
         if no_usage_data:
@@ -272,7 +303,14 @@ class MainWindow(QMainWindow):
 
         self.state.connect("marker size", self.plotFrame)
         self.state.connect("node label size", self.plotFrame)
-        self.state.connect("show non-visible nodes", self.plotFrame)
+        self.state.connect("show non-visible nodes", self._on_show_non_visible_toggled)
+        # Label QC display mode (#2783): a non-manual mode derives the
+        # per-instance visibility from the mode + selection and replots; switching
+        # back to "manual" clears the mode-driven state. Selection changes are
+        # followed only in a non-manual mode -- in the default "manual" mode
+        # selecting an instance stays lightweight (no replot), as before.
+        self.state.connect(QC_DISPLAY_MODE_KEY, self._on_qc_display_mode_changed)
+        self.state.connect("instance", self._on_qc_selection_changed)
 
         if self.state["share usage data"]:
             ping_analytics()
@@ -342,7 +380,9 @@ class MainWindow(QMainWindow):
         prefs["propagate track labels"] = self.state["propagate track labels"]
         prefs["color predicted"] = self.state["color predicted"]
         prefs["trail length"] = self.state["trail_length"]
-        prefs["trail shade"] = self.state["trail_shade"]
+        prefs["trail node"] = self.state["trail_node"]
+        prefs["trail alpha"] = self.state["trail_alpha"]
+        prefs["trail alpha fade"] = self.state["trail_alpha_fade"]
         prefs["share usage data"] = self.state["share usage data"]
 
         # Save preferences.
@@ -375,17 +415,27 @@ class MainWindow(QMainWindow):
                 event.accept()
 
     def dragEnterEvent(self, event):
-        # TODO: Parse filenames and accept only if valid ext (or folder)
-        mime_format = 'application/x-qt-windows-mime;value="FileName"'
-        if mime_format in event.mimeData().formats():
-            # This only returns the first filename if multiple files are dropped:
-            event.mimeData().data(mime_format).data().decode()
+        # Accept the drag if it carries file URLs. Files dropped from a file
+        # manager are exposed as a "text/uri-list" payload on all platforms
+        # (Linux/macOS/Windows), which is what dropEvent() parses below.
+        # (Previously this only accepted a Windows-specific MIME type, so
+        # drag-and-drop silently did nothing on Linux and macOS.)
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        # Keep showing the "accept" cursor while a valid drag hovers the window.
+        if event.mimeData().hasUrls():
             event.acceptProposedAction()
 
     def dropEvent(self, event):
+        if not event.mimeData().hasUrls():
+            return
+
         # Parse filenames
         filenames = event.mimeData().data("text/uri-list").data().decode()
         filenames = [parse_uri_path(f.strip()) for f in filenames.strip().split("\n")]
+        filenames = [f for f in filenames if f]
 
         exts = [Path(f).suffix for f in filenames]
 
@@ -397,18 +447,21 @@ class MainWindow(QMainWindow):
                 # Load
                 self.commands.openProject(filename=filenames[0], first_open=True)
 
-        elif all([ext.lower()[1:] in available_video_exts() for ext in exts]):
+        elif exts and all(ext.lower()[1:] in available_video_exts() for ext in exts):
             # Import videos
             self.commands.showImportVideos(filenames=filenames)
 
         else:
-            supported = f".slp, .{', .'.join(available_video_exts())}"
+            dropped = ", ".join(exts) or "(unknown)"
             QMessageBox.warning(
                 self,
-                "Unsupported File Type",
-                f"Cannot open file(s) with extension(s): {', '.join(exts)}\n\n"
-                f"Supported formats: {supported}",
+                "Unsupported file type",
+                f"Couldn't open the dropped file(s): {dropped}\n\n"
+                f"Supported formats: .slp, .{', .'.join(available_video_exts())}",
             )
+            return
+
+        event.acceptProposedAction()
 
     @property
     def labels(self) -> Labels:
@@ -666,6 +719,12 @@ class MainWindow(QMainWindow):
         )
         add_menu_item(
             goMenu,
+            "goto prev user",
+            "Previous User Labeled Frame",
+            self.commands.prevUserLabeledFrame,
+        )
+        add_menu_item(
+            goMenu,
             "goto next suggestion",
             "Next Suggestion",
             self._goto_next_suggestion_or_flag,
@@ -722,22 +781,36 @@ class MainWindow(QMainWindow):
 
         viewMenu = self.menuBar().addMenu("View")
         self.viewMenu = viewMenu  # store as attribute so docks can add items
+        viewMenu.setToolTipsVisible(True)
 
         viewMenu.addSeparator()
         add_menu_check_item(viewMenu, "fit", "Fit View to Instances")
         add_menu_check_item(viewMenu, "fit_selection", "Fit View to Selection")
+        add_menu_check_item(viewMenu, "actual_size", "Actual Size (1:1)")
 
-        # Make fit and fit_selection mutually exclusive
+        # Make fit, fit_selection, and actual_size mutually exclusive
         def _on_fit_changed(value):
             if value:
                 self.state["fit_selection"] = False
+                self.state["actual_size"] = False
 
         def _on_fit_selection_changed(value):
             if value:
                 self.state["fit"] = False
+                self.state["actual_size"] = False
+
+        def _on_actual_size_changed(value):
+            if value:
+                self.state["fit"] = False
+                self.state["fit_selection"] = False
+                self.player.zoomToActualSize()
+            else:
+                self.player.view.clearZoom()
+                self.player.view.updateViewer()
 
         self.state.connect("fit", _on_fit_changed)
         self.state.connect("fit_selection", _on_fit_selection_changed)
+        self.state.connect("actual_size", _on_actual_size_changed)
 
         viewMenu.addSeparator()
         add_menu_check_item(viewMenu, "color predicted", "Color Predicted Instances")
@@ -771,6 +844,26 @@ class MainWindow(QMainWindow):
         add_menu_check_item(viewMenu, "show edges", "Show Edges")
         add_menu_check_item(viewMenu, "show mean node score", "Show Mean Node Score")
 
+        # Instance-focus display-mode selector (#2783), mirrored from the QC
+        # dock's "Display:" combo so the modes are reachable from the menu too.
+        # Kept in sync with QC_DISPLAY_MODE_KEY: menu clicks set it; external
+        # changes (e.g. the dock combo) re-check the matching item.
+        qc_display_menu = viewMenu.addMenu("Instance Focus")
+        self._qc_display_actions = {}
+        for _label, _mode in QC_MODE_CHOICES:
+            _act = qc_display_menu.addAction(
+                _label, lambda m=_mode: self.state.set(QC_DISPLAY_MODE_KEY, m)
+            )
+            _act.setCheckable(True)
+            self._qc_display_actions[_mode] = _act
+
+        def _sync_qc_display_menu(mode):
+            for _m, _a in self._qc_display_actions.items():
+                _a.setChecked(_m == mode)
+
+        self.state.connect(QC_DISPLAY_MODE_KEY, _sync_qc_display_menu)
+        self.state.emit(QC_DISPLAY_MODE_KEY)
+
         add_submenu_choices(
             menu=viewMenu,
             title="Edge Style",
@@ -800,11 +893,22 @@ class MainWindow(QMainWindow):
             options=TrackTrailOverlay.get_length_options(),
             key="trail_length",
         )
+        self.trail_node_menu = viewMenu.addMenu("Trail Node")
+        self.trail_node_menu.setToolTip(
+            "Which point the trail follows: the instance centroid, or a named "
+            "skeleton node.\n\n"
+            "Trails now render for untracked / single-instance data too. "
+            "Without tracks, trail color follows each frame's instance order "
+            "rather than a stable identity, so colors may shift between frames."
+        )
+        self._update_trail_node_menu()
+        self.state.connect("trail_node", self._sync_trail_node_menu)
+        add_menu_check_item(viewMenu, "trail_alpha_fade", "Fade Older Trail Segments")
         add_submenu_choices(
             menu=viewMenu,
-            title="Trail Shade",
-            options=tuple(TrackTrailOverlay.get_shade_options().keys()),
-            key="trail_shade",
+            title="Trail Opacity",
+            options=(0.25, 0.5, 0.75, 1.0),
+            key="trail_alpha",
         )
 
         viewMenu.addSeparator()
@@ -862,9 +966,29 @@ class MainWindow(QMainWindow):
 
         add_menu_item(
             labelMenu,
+            "merge instance",
+            "Merge Instance",
+            lambda: self.commands.mergeInstance(),
+        )
+
+        add_menu_item(
+            labelMenu,
             "custom delete",
             "Custom Instance Delete...",
             self.commands.deleteDialog,
+        )
+
+        labelMenu.addSeparator()
+
+        self.negative_frame_action = labelMenu.addAction(
+            "Mark Frame as Negative",
+            self.commands.toggleCurrentFrameNegative,
+            self.shortcuts["mark negative"],
+        )
+        self.negative_frame_action.setCheckable(True)
+        self.negative_frame_action.setToolTip(
+            "Mark this frame as a negative (background) frame with no animals, "
+            "used as a training example to reduce false positives."
         )
 
         labelMenu.addSeparator()
@@ -890,6 +1014,13 @@ class MainWindow(QMainWindow):
             "add instances from all frame predictions",
             "Add Instances from All Predictions on Current Frame",
             self.commands.addUserInstancesFromPredictions,
+        )
+
+        add_menu_item(
+            labelMenu,
+            "accept all predictions",
+            "Accept All Predictions...",
+            self.commands.addUserInstancesFromAllPredictions,
         )
 
         labelMenu.addSeparator()
@@ -1160,7 +1291,7 @@ class MainWindow(QMainWindow):
         helpMenu.addSeparator()
         helpMenu.addAction("User Controls", self._show_user_controls_window)
         helpMenu.addAction("Keyboard Shortcuts", self._show_keyboard_shortcuts_window)
-        add_menu_check_item(helpMenu, "debug mode", "Debug mode")
+        add_menu_check_item(helpMenu, "experimental features", "Experimental Features")
 
     def process_events_then(self, action: Callable):
         """Decorates a function with a call to first process events."""
@@ -1251,11 +1382,16 @@ class MainWindow(QMainWindow):
         self.overlays["trails"] = TrackTrailOverlay(
             labels=self.labels,
             player=self.player,
-            trail_shade=self.state["trail_shade"],
             trail_length=self.state["trail_length"],
+            trail_node=self.state["trail_node"],
+            trail_alpha=self.state["trail_alpha"],
+            trail_alpha_fade=self.state["trail_alpha_fade"],
         )
         self.overlays["instance"] = InstanceOverlay(
             labels=self.labels, player=self.player, state=self.state
+        )
+        self.overlays["negative_frame"] = NegativeFrameOverlay(
+            labels=self.labels, player=self.player
         )
 
         # When gui state changes, we also want to set corresponding attribute
@@ -1272,7 +1408,9 @@ class MainWindow(QMainWindow):
             )
 
         overlay_state_connect(self.overlays["trails"], "trail_length")
-        overlay_state_connect(self.overlays["trails"], "trail_shade")
+        overlay_state_connect(self.overlays["trails"], "trail_node")
+        overlay_state_connect(self.overlays["trails"], "trail_alpha")
+        overlay_state_connect(self.overlays["trails"], "trail_alpha_fade")
 
         overlay_state_connect(self.color_manager, "palette")
         overlay_state_connect(self.color_manager, "distinctly_color")
@@ -1317,6 +1455,11 @@ class MainWindow(QMainWindow):
             self.state["labeled_frame"] is not None
             and len(self.state["labeled_frame"].instances) > 1
         )
+        # Merge requires at least two *user* instances (predicted excluded).
+        has_multiple_user_instances = (
+            self.state["labeled_frame"] is not None
+            and len(self.state["labeled_frame"].user_instances) > 1
+        )
         # todo: exclude predicted instances from count
         has_nodes_selected = (
             self.skeleton_dock.skeletonEdgesSrc.currentIndex() > -1
@@ -1338,6 +1481,7 @@ class MainWindow(QMainWindow):
         self._menu_actions["extract clip labels package"].setEnabled(has_frame_range)
 
         self._menu_actions["transpose"].setEnabled(has_multiple_instances)
+        self._menu_actions["merge instance"].setEnabled(has_multiple_user_instances)
 
         self._menu_actions["save"].setEnabled(has_unsaved_changes)
 
@@ -1402,6 +1546,9 @@ class MainWindow(QMainWindow):
             ]
         ):
             self._update_seekbar_marks()
+            # Toggling the negative-frame flag does not change the plotted
+            # frame, so refresh the status bar (and menu check) explicitly.
+            self.updateStatusMessage()
 
         if _has_topic(
             [UpdateTopic.frame, UpdateTopic.project_instances, UpdateTopic.tracks]
@@ -1430,8 +1577,20 @@ class MainWindow(QMainWindow):
                     "node", self.labels.skeletons[0].node_names
                 )
 
+            if hasattr(self, "trail_node_menu"):
+                self._update_trail_node_menu()
+
         if _has_topic([UpdateTopic.project, UpdateTopic.on_frame]):
             self.instances_dock.table.model().items = self.state["labeled_frame"]
+
+        if _has_topic([UpdateTopic.project]):
+            # Keep the QC dock pointed at the currently loaded project. The dock
+            # is created once and persists across project loads, so without this
+            # it can hold a stale (or empty) Labels object and report "Need at
+            # least 2 instances" until something re-triggers its visibility sync.
+            # update_labels is a no-op when the labels object is unchanged.
+            if hasattr(self, "_qc_dock"):
+                self._qc_dock.update_labels(self.labels)
 
         if _has_topic([UpdateTopic.suggestions]):
             self.suggestions_dock.table.model().items = self.labels.suggestions
@@ -1462,6 +1621,78 @@ class MainWindow(QMainWindow):
 
         if _has_topic([UpdateTopic.frame, UpdateTopic.project_instances]):
             self.state["last_interacted_frame"] = self.state["labeled_frame"]
+
+    def _recompute_qc_flags_into_state(self):
+        """Recompute the transient per-instance keys from the QC display mode.
+
+        Does NOT replot -- callers either replot themselves (the QC display-mode
+        callbacks) or are already inside the plot path (`_after_plot_change`). In
+        "manual" mode this is a no-op so the Instances-dock columns (#2755/#2782)
+        stay in control. Otherwise the mode OWNS all three transient keys: it
+        overwrites the hidden set and the show-non-visible override wholesale, and
+        forces view-only off (the mode decides visibility, not a per-row radio).
+        See `sleap.gui.state.compute_qc_visibility` for the mode -> flags mapping.
+        """
+        mode = self.state[QC_DISPLAY_MODE_KEY]
+        if mode == QC_MODE_MANUAL:
+            return
+        instances = get_instances_to_show(self.state["labeled_frame"])
+        selected = self.state["instance"]
+        global_snv = self.state.get("show non-visible nodes", default=True)
+        flags = compute_qc_visibility(mode, selected, instances, global_snv)
+        self.state[INSTANCE_HIDDEN_KEY] = {
+            iid for iid, (vis, _) in flags.items() if not vis
+        }
+        self.state[VIEW_ONLY_INSTANCE_KEY] = None
+        self.state[SHOW_NONVISIBLE_OVERRIDE_KEY] = {
+            iid: snv for iid, (_, snv) in flags.items()
+        }
+
+    def _on_qc_display_mode_changed(self, *args):
+        """The Label QC display mode itself changed (#2783): re-derive + replot.
+
+        A non-manual mode derives the transient per-instance keys from the
+        current selection; switching back to "manual" clears the mode-driven
+        keys so the Instances-dock columns (#2755/#2782) regain control. Either
+        way a full `plotFrame` is REQUIRED because `show_non_visible` is baked
+        into each `QtInstance` at creation -- `setVisible` cannot resurrect
+        node/edge children that were never built.
+        """
+        if self.state[QC_DISPLAY_MODE_KEY] == QC_MODE_MANUAL:
+            # Hand control back to the Instances-dock columns.
+            self.state[INSTANCE_HIDDEN_KEY] = set()
+            self.state[VIEW_ONLY_INSTANCE_KEY] = None
+            self.state[SHOW_NONVISIBLE_OVERRIDE_KEY] = {}
+        else:
+            self._recompute_qc_flags_into_state()
+        self.plotFrame()
+
+    def _on_qc_selection_changed(self, *args):
+        """Selection changed: follow it only when a non-manual QC mode is active.
+
+        In the default "manual" mode selecting an instance must stay lightweight
+        (NO replot), matching pre-#2783 behavior -- otherwise every canvas click
+        would rebuild the whole frame. A non-manual mode re-derives the
+        per-instance flags for the new selection and replots (e.g. `selected_only`
+        follows the active instance).
+        """
+        if self.state[QC_DISPLAY_MODE_KEY] == QC_MODE_MANUAL:
+            return
+        self._recompute_qc_flags_into_state()
+        self.plotFrame()
+
+    def _on_show_non_visible_toggled(self, *args):
+        """Global "Show Non-Visible Nodes" toggled (Shift+V): re-derive + replot.
+
+        The toggle is a master gate even inside an Instance Focus mode (#2783): in
+        a non-manual mode, re-derive the per-instance occluded flags with the new
+        global value (`compute_qc_visibility` ANDs the mode's occluded display with
+        it), so turning it off hides occluded keypoints for every instance. The
+        recompute is a no-op in manual mode, where the global flag is just the
+        per-instance default as before -- either way we then replot.
+        """
+        self._recompute_qc_flags_into_state()
+        self.plotFrame()
 
     def plotFrame(self, *args, **kwargs):
         """Plots (or replots) current frame."""
@@ -1496,6 +1727,25 @@ class MainWindow(QMainWindow):
             else None
         )
 
+        # Reset transient per-instance visibility only when the frame actually
+        # changes: the instances (and thus the id()-keyed visibility state)
+        # differ per frame. `_after_plot_change` also fires on same-frame replots
+        # (marker size, add instance, palette, etc.); resetting there would wipe
+        # the user's hide / view-only selections, so gate on the (video,
+        # frame_idx) key. Must run BEFORE the overlay redraw below so the
+        # instance overlay applies the cleared state.
+        frame_key = (self.state["video"], frame_idx)
+        if frame_key != self._vis_last_frame_key:
+            self._vis_last_frame_key = frame_key
+            self.state[INSTANCE_HIDDEN_KEY] = set()
+            self.state[VIEW_ONLY_INSTANCE_KEY] = None
+            self.state[SHOW_NONVISIBLE_OVERRIDE_KEY] = {}
+            # A non-manual QC display mode (#2783) owns these transient keys, so
+            # re-derive them for the freshly navigated frame. No `plotFrame` here:
+            # we are already inside the plot path and the overlay redraw below
+            # will apply the recomputed state (calling plotFrame would recurse).
+            self._recompute_qc_flags_into_state()
+
         # Show instances, etc, for this frame
         for overlay in self.overlays.values():
             try:
@@ -1524,6 +1774,8 @@ class MainWindow(QMainWindow):
             player.zoomToFit()
         elif self.state["fit_selection"]:
             player.zoomToSelection()
+        elif self.state["actual_size"]:
+            player.zoomToActualSize()
 
         # Update related displays
         self.updateStatusMessage()
@@ -1603,6 +1855,16 @@ class MainWindow(QMainWindow):
             else:
                 self.statusBar().setStyleSheet("")
 
+            if lf is not None and lf.is_negative:
+                message += f"{spacer}[NEGATIVE FRAME]"
+
+        # Keep the Labels-menu negative-frame checkmark in sync with the frame.
+        if hasattr(self, "negative_frame_action"):
+            current_lf = self.state["labeled_frame"]
+            self.negative_frame_action.setChecked(
+                bool(current_lf is not None and current_lf.is_negative)
+            )
+
         self.statusBar().showMessage(message)
 
     def resetPrefs(self):
@@ -1627,6 +1889,38 @@ class MainWindow(QMainWindow):
             subprocess.Popen(["open", str(pref_path)])
         else:
             subprocess.Popen(["xdg-open", str(pref_path)])
+
+    @staticmethod
+    def _trail_node_menu_label(option: str) -> str:
+        return "Centroid" if option == "centroid" else option
+
+    def _sync_trail_node_menu(self, value):
+        """Check the Trail Node menu item matching `value`, uncheck the rest."""
+        for action in self.trail_node_menu.actions():
+            action.setChecked(action.text() == self._trail_node_menu_label(value))
+
+    def _update_trail_node_menu(self):
+        """Rebuild the Trail Node menu from the current skeleton.
+
+        Options are per-project (skeleton node names), unlike the other Trail
+        submenus, so this rebuilds on skeleton changes rather than being built
+        once with a fixed option list.
+        """
+        self.trail_node_menu.clear()
+
+        options = TrackTrailOverlay.get_node_options(self.labels)
+        if self.state["trail_node"] not in options:
+            # Stale selection from a previously loaded project with a
+            # different skeleton -- fall back to centroid.
+            self.state["trail_node"] = "centroid"
+
+        for option in options:
+            action = self.trail_node_menu.addAction(
+                self._trail_node_menu_label(option),
+                lambda x=option: self.state.set("trail_node", x),
+            )
+            action.setCheckable(True)
+            action.setChecked(self.state["trail_node"] == option)
 
     def _update_track_menu(self):
         """Updates track menu options."""
@@ -1879,7 +2173,22 @@ class MainWindow(QMainWindow):
             ).exec_()
             return
 
-        if not self.state["filename"] or self.state["has_changes"]:
+        if self.labels is None or len(self.labels.videos) == 0:
+            QMessageBox(
+                text=(
+                    "This project has no videos. Please add a video before "
+                    "running training or inference."
+                )
+            ).exec_()
+            return
+
+        if not self.state["filename"]:
+            QMessageBox(
+                text=("Please save your project before running training or inference.")
+            ).exec_()
+            return
+
+        if self.state["has_changes"]:
             QMessageBox(
                 text=(
                     "You have unsaved changes. Please save before running "
@@ -1894,6 +2203,7 @@ class MainWindow(QMainWindow):
                 mode,
                 self.state["filename"],
                 self.labels,
+                parent=self,
             )
             self._child_windows[mode]._handle_learning_finished.connect(
                 self._handle_learning_finished

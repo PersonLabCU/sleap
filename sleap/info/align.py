@@ -281,6 +281,12 @@ def get_template_points_array(instances: List[Instance]) -> np.ndarray:
     """Returns mean of aligned points for instances."""
     points = get_instances_points(instances)
 
+    # Alignment via a stable node pair is undefined when the skeleton has
+    # fewer than two nodes. Return the nan-mean across instances directly
+    # so single-node skeletons work in the GUI new-instance flow (#2718).
+    if points.shape[1] < 2:
+        return np.nanmean(points, axis=0)
+
     node_a, node_b = get_most_stable_node_pair(points, min_dist=4.0)
 
     aligned = align_instances(points, node_a=node_a, node_b=node_b)

@@ -520,9 +520,10 @@ class QtVideoPlayer(QWidget):
 
         # Create the worker thread
         self.worker_thread = FrameLoaderThread()
-        self.worker_thread.debug_mode = self.state["debug mode"]
+        self.worker_thread.debug_mode = self.state["experimental features"]
         self.state.connect(
-            "debug mode", lambda value: self.worker_thread.set_debug_mode(value)
+            "experimental features",
+            lambda value: self.worker_thread.set_debug_mode(value),
         )
 
         # Connect the result signal to display frames
@@ -987,6 +988,47 @@ class QtVideoPlayer(QWidget):
                     ),
                 )
 
+        if self.context is not None:
+            self.context_menu.addSeparator()
+            negative_action = self.context_menu.addAction(
+                "Mark Frame as Negative",
+                self.context.toggleCurrentFrameNegative,
+            )
+            negative_action.setCheckable(True)
+            current_lf = self.context.state["labeled_frame"]
+            negative_action.setChecked(
+                bool(current_lf is not None and current_lf.is_negative)
+            )
+            self._menu_actions["Mark Frame as Negative"] = negative_action
+
+            # "Merge Instance with >" submenu: merge another user instance in
+            # this frame into the currently selected (user) instance.
+            selected = self.context.state["instance"]
+            if (
+                selected is not None
+                and current_lf is not None
+                and type(selected) is Instance
+            ):
+                others = [
+                    inst
+                    for inst in current_lf.instances
+                    if type(inst) is Instance and inst is not selected
+                ]
+                if others:
+                    self.context_menu.addSeparator()
+                    merge_menu = self.context_menu.addMenu("Merge Instance with")
+                    for donor in others:
+                        if donor.track is not None:
+                            label = f"Track: {donor.track.name}"
+                        else:
+                            label = f"Instance {current_lf.instances.index(donor)}"
+                        merge_menu.addAction(
+                            label,
+                            lambda checked=False, d=donor: self.context.mergeInstance(
+                                donor=d
+                            ),
+                        )
+
         return self.context_menu
 
     def show_contextual_menu(self, where: QtCore.QPoint):
@@ -1331,6 +1373,10 @@ class QtVideoPlayer(QWidget):
             self.view.zoomToRect(zoom_rect)
             return True
         return False
+
+    def zoomToActualSize(self):
+        """Zoom view to 1:1 pixel mapping (actual size)."""
+        self.view.zoomToActualSize()
 
     def setFitZoom(self, value):
         """Zooms or unzooms current view to fit all instances."""
@@ -2267,6 +2313,17 @@ class GraphicsView(QGraphicsView):
         self.zoomFactor = scale
         self.updateViewer()
         self.centerOn(zoom_rect.center())
+
+    def zoomToActualSize(self):
+        """Zoom to 1:1 pixel mapping so the image displays at native resolution."""
+        if not self.hasImage():
+            return
+        base_w_scale = self.width() / self.sceneRect().width()
+        base_h_scale = self.height() / self.sceneRect().height()
+        base_scale = min(base_w_scale, base_h_scale)
+        if base_scale > 0:
+            self.zoomFactor = 1.0 / base_scale
+            self.updateViewer()
 
     def clearZoom(self):
         """Clear zoom stack. Doesn't update display."""
@@ -3604,7 +3661,7 @@ class QtInstance(QGraphicsObject):
         """Duplicate the instance and add it to the scene."""
         # Add instance to the context
         if self.player.context is None:
-            if self.player.state["debug mode"]:
+            if self.player.state["experimental features"]:
                 print("self.player.context is None, cannot duplicate instance")
             return
 

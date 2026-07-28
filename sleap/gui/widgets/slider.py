@@ -62,12 +62,13 @@ class SliderMark:
     def color(self):
         """Returns color of mark."""
         colors = dict(
-            simple=(52, 211, 153),      # emerald green - user labeled
-            simple_thin=(251, 191, 36), # amber - predicted, no track identity
-            filled=(99, 102, 241),      # indigo - suggested frame with user labels
-            open=(148, 163, 184),       # slate - suggested frame, empty
-            predicted=(56, 189, 248),   # sky blue - suggested frame with predictions
-            tick=(180, 180, 180),       # light gray tick marks
+            simple=(52, 211, 153),  # emerald green - user labeled
+            simple_thin=(251, 191, 36),  # amber - predicted, no track identity
+            filled=(99, 102, 241),  # indigo - suggested frame with user labels
+            open=(148, 163, 184),  # slate - suggested frame, empty
+            predicted=(56, 189, 248),  # sky blue - suggested frame with predictions
+            negative=(30, 144, 255),  # dodger blue (matches NegativeFrameOverlay)
+            tick=(180, 180, 180),  # light gray tick marks
             tick_column=(120, 120, 120),
         )
 
@@ -116,7 +117,7 @@ class SliderMark:
             return 6
         if self.type == "simple_thin":
             return 3
-        if self.type in ("tick", "tick_column"):
+        if self.type in ("tick", "tick_column", "negative"):
             return 2
         return 0
 
@@ -1263,7 +1264,10 @@ class VideoSlider(QtWidgets.QGraphicsView):
                     hover_frame_idx,
                 )
                 tooltip = f"Frame {hover_frame_idx + 1}"
-            QtWidgets.QToolTip.showText(event.globalPos(), tooltip)
+            # Pass `self` as the parent widget so the tooltip popup has a
+            # transientParent; without it Wayland fails to create the popup and
+            # floods stderr with warnings (see #2779).
+            QtWidgets.QToolTip.showText(event.globalPos(), tooltip, self)
 
         self.mouseMoved.emit(scenePos.x(), scenePos.y())
 
@@ -1322,6 +1326,7 @@ class SemanticMarkType(Enum):
     suggested_with_user = "filled"
     suggested_with_nothing = "open"
     suggested_with_predicted = "predicted"
+    negative = "negative"
 
 
 def _find_labeled_frame_for_tooltip(
@@ -1376,7 +1381,9 @@ def set_slider_marks_from_labels(
 
         frame_mark_types = {mark.type for mark in slider.getMarksAtVal(idx)}
 
-        if SemanticMarkType.user.value in frame_mark_types:
+        if SemanticMarkType.negative.value in frame_mark_types:
+            tooltip += "\nnegative (background) frame"
+        elif SemanticMarkType.user.value in frame_mark_types:
             tooltip += "\nuser labeled"
         elif SemanticMarkType.predicted_no_track.value in frame_mark_types:
             tooltip += "\nprediction without track identity"
@@ -1461,15 +1468,21 @@ def set_slider_marks_from_labels(
 
     labeled_marks = {lf.frame_idx for lf in lfs}
     user_labeled = {lf.frame_idx for lf in lfs if len(lf.user_instances)}
+    negative_frames = {lf.frame_idx for lf in lfs if lf.is_negative}
     suggested_frames = set(get_video_suggestions(labels, video))
 
     all_simple_frames = set()
     all_simple_frames.update(untracked_frames)
     all_simple_frames.update(suggested_frames)
     all_simple_frames.update(user_labeled)
+    all_simple_frames.update(negative_frames)
 
     for frame_idx in all_simple_frames:
-        if frame_idx in suggested_frames:
+        if frame_idx in negative_frames:
+            # Negative frames take priority: they have no instances, so the
+            # only realistic overlap is "suggested + negative".
+            mark_type = SemanticMarkType.negative
+        elif frame_idx in suggested_frames:
             if frame_idx in user_labeled:
                 # suggested frame with user labeled instances
                 mark_type = SemanticMarkType.suggested_with_user

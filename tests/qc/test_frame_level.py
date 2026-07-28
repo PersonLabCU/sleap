@@ -5,6 +5,7 @@ import pytest
 
 from sleap.qc.frame_level import (
     InstanceCountChecker,
+    check_negative_frame,
     compute_instance_iou,
     compute_node_overlap,
     detect_duplicates,
@@ -183,6 +184,10 @@ class TestComputeNodeOverlap:
 
         assert len(result["common_nodes"]) == 0
         assert result["overlap_ratio"] == 0.0
+        # Key parity with the normal-path return so callers never KeyError.
+        assert result["mean_distance"] == float("inf")
+        assert result["min_distance"] == float("inf")
+        assert result["max_distance"] == float("inf")
 
 
 class TestDetectDuplicates:
@@ -262,3 +267,23 @@ class TestDetectDuplicates:
 
         # May or may not be detected as duplicate depending on thresholds
         assert isinstance(duplicates, list)
+
+
+class TestCheckNegativeFrame:
+    """Tests for check_negative_frame."""
+
+    def test_negative_frame_with_instances_is_flagged(self):
+        """A negative frame that still has instances is inconsistent."""
+        assert check_negative_frame(is_negative=True, instance_count=2)
+
+    def test_clean_negative_frame_passes(self):
+        """A negative frame with no instances is consistent."""
+        assert not check_negative_frame(is_negative=True, instance_count=0)
+
+    def test_normal_frame_with_instances_passes(self):
+        """A non-negative frame with instances is consistent."""
+        assert not check_negative_frame(is_negative=False, instance_count=3)
+
+    def test_normal_empty_frame_passes(self):
+        """A non-negative empty frame is consistent."""
+        assert not check_negative_frame(is_negative=False, instance_count=0)

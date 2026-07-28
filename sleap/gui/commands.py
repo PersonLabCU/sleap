@@ -106,7 +106,10 @@ from sleap.sleap_io_adaptors.skeleton_utils import (
     to_graph,
 )
 from sleap.sleap_io_adaptors.video_utils import video_util_reset
-from sleap.sleap_io_adaptors.instance_utils import align_labeled_frames_to_skeleton
+from sleap.sleap_io_adaptors.instance_utils import (
+    align_labeled_frames_to_skeleton,
+    instance_get_points_array,
+)
 from sleap.sleap_io_adaptors.lf_labels_utils import (
     get_next_suggestion,
     track_swap,
@@ -453,6 +456,10 @@ class CommandContext:
         """Goes to next labeled frame with user instances."""
         self.execute(GoNextUserLabeledFrame)
 
+    def prevUserLabeledFrame(self):
+        """Goes to previous labeled frame with user instances."""
+        self.execute(GoPrevUserLabeledFrame)
+
     def lastInteractedFrame(self):
         """Goes to last frame that user interacted with."""
         self.execute(GoLastInteractedFrame)
@@ -517,6 +524,15 @@ class CommandContext:
             user_instances = lf.user_instances if hasattr(lf, "user_instances") else []
             if 0 <= instance_idx < len(user_instances):
                 instance_to_highlight = user_instances[instance_idx]
+
+        # Make the navigated instance the app-selected instance (not just a
+        # player-view highlight) so anything keyed off ``state["instance"]``
+        # follows it -- in particular the Label QC display modes (#2783), which
+        # focus on the selected instance. Without this, navigating to a flagged
+        # instance left ``state["instance"]`` unchanged, so those modes saw no
+        # on-frame selection and fell back to the first instance.
+        if instance_to_highlight is not None:
+            self.state["instance"] = instance_to_highlight
 
         # Use a timer to highlight and select after the frame is redrawn
         # (state changes trigger plot() which recreates instances via overlay)
@@ -711,6 +727,14 @@ class CommandContext:
         """Create user instance from a predicted instance."""
         self.execute(AddUserInstancesFromPredictions)
 
+    def addUserInstancesFromAllPredictions(self):
+        """Create user instances from all predicted instances across all frames."""
+        self.execute(AddUserInstancesFromAllPredictions)
+
+    def toggleCurrentFrameNegative(self):
+        """Mark or unmark the current frame as a negative (background) frame."""
+        self.execute(ToggleNegativeFrame)
+
     def copyInstance(self):
         """Copy the selected instance to the instance clipboard."""
         self.execute(CopyInstance)
@@ -733,6 +757,15 @@ class CommandContext:
     def deleteSelectedInstance(self):
         """Deletes currently selected instance."""
         self.execute(DeleteSelectedInstance)
+
+    def mergeInstance(self, donor: Optional["Instance"] = None):
+        """Merge another user instance in the frame into the selected one.
+
+        The selected instance is kept (survivor) and gains the donor's labeled
+        keypoints for any nodes it is missing. If `donor` is None and the frame
+        has exactly two user instances, the other one is used as the donor.
+        """
+        self.execute(MergeInstances, donor=donor)
 
     def deleteSelectedInstanceTrack(self):
         """Deletes all instances from track of currently selected instance."""
@@ -1071,7 +1104,7 @@ class ImportDeepLabCutFolder(AppCommand):
             if merged_labels is None:
                 merged_labels = labels
             else:
-                merged_labels.merge(labels, frame="auto")
+                merged_labels.merge(labels, track="name", frame="auto")
         return merged_labels
 
 
@@ -1734,6 +1767,23 @@ class ExportLabeledClip(AppCommand):
         params["show_edges"] = export_params.get("show_edges", True)
         params["background"] = export_params.get("background")
         params["open_when_done"] = export_params.get("open_when_done", True)
+        params["include_unlabeled"] = export_params.get("include_unlabeled", False)
+        params["start"] = export_params.get("start")
+        params["end"] = export_params.get("end")
+
+        # Motion trail params are only present in export_params when the user
+        # enabled trails; copy through whatever is there.
+        for key in (
+            "show_trails",
+            "trail_length",
+            "trail_node",
+            "trail_width",
+            "trail_alpha_fade",
+            "trail_alpha",
+            "trail_color",
+        ):
+            if key in export_params:
+                params[key] = export_params[key]
 
         return True
 
@@ -1767,12 +1817,42 @@ class ExportLabeledClip(AppCommand):
         if params.get("background"):
             render_params["background"] = params["background"]
 
+        # Motion trails. Only forward when enabled so the default render path is
+        # untouched. trail_color / trail_alpha_fade may legitimately be falsy,
+        # so guard on presence rather than truthiness once trails are on.
+        if params.get("show_trails"):
+            render_params["show_trails"] = True
+            for key in (
+                "trail_length",
+                "trail_node",
+                "trail_width",
+                "trail_alpha_fade",
+                "trail_alpha",
+                "trail_color",
+            ):
+                if key in params:
+                    render_params[key] = params[key]
+
+        # When the user opts in to include unlabeled frames, hand sleap-io the
+        # full range instead of a labeled-only frame_inds list — otherwise the
+        # explicit frame_inds would restrict output back to labeled frames.
+        include_unlabeled = params.get("include_unlabeled", False)
+        if include_unlabeled:
+            render_params["include_unlabeled"] = True
+            if params.get("start") is not None:
+                render_params["start"] = params["start"]
+            if params.get("end") is not None:
+                render_params["end"] = params["end"]
+            frame_inds = None
+        else:
+            frame_inds = params.get("frame_indices")
+
         # Render with progress dialog (non-blocking)
         render_video_gui(
             labels=labels,
             filename=params["video_filename"],
             video=video,
-            frame_inds=params.get("frame_indices"),
+            frame_inds=frame_inds,
             render_params=render_params,
             open_when_done=params.get("open_when_done", True),
         )
@@ -2077,9 +2157,20 @@ def render_video_gui(
     # aren't rendered as ghost skeletons alongside their user counterparts.
     labels = _labels_with_visible_instances(labels, video)
 
-    # Calculate total frames for progress
+    # Calculate total frames for progress. When the caller asked for unlabeled
+    # frames to be included we can't infer the count from labeled frames; try
+    # the video shape, then fall back to the labeled-frame count as a starting
+    # estimate (the progress callback corrects ``total`` on its first tick).
     if frame_inds is not None:
         total_frames = len(frame_inds)
+    elif render_params.get("include_unlabeled"):
+        start = render_params.get("start")
+        end = render_params.get("end")
+        if start is not None and end is not None:
+            total_frames = max(end - start, 0)
+        else:
+            video_shape = getattr(video, "shape", None)
+            total_frames = int(video_shape[0]) if video_shape is not None else 0
     else:
         total_frames = len(
             [lf for lf in labels.labeled_frames if video is None or lf.video == video]
@@ -2681,6 +2772,23 @@ class GoNextUserLabeledFrame(GoIteratorCommand):
             from_frame_idx=context.state["frame_idx"],
         )
         # Filter to frames with user instances
+        iterate_labeled_frames = filter(
+            lambda lf: lf.has_user_instances, iterate_labeled_frames
+        )
+        return iterate_labeled_frames
+
+
+class GoPrevUserLabeledFrame(GoIteratorCommand):
+    @staticmethod
+    def _get_frame_iterator(context: CommandContext):
+        from sleap.sleap_io_adaptors.lf_labels_utils import iterate_labeled_frames
+
+        iterate_labeled_frames = iterate_labeled_frames(
+            context.labels,
+            context.state["video"],
+            from_frame_idx=context.state["frame_idx"],
+            reverse=True,
+        )
         iterate_labeled_frames = filter(
             lambda lf: lf.has_user_instances, iterate_labeled_frames
         )
@@ -3989,7 +4097,7 @@ class DeleteAreaPredictions(InstanceDeleteCommand):
         max_corner = params["max_corner"]
 
         def is_bounded(inst):
-            points_array = inst.points_array
+            points_array = instance_get_points_array(inst)
             valid_points = points_array[~np.isnan(points_array).any(axis=1)]
 
             is_gt_min = np.all(valid_points >= min_corner)
@@ -4106,7 +4214,8 @@ class DeleteFrameLimitPredictions(InstanceDeleteCommand):
     def ask(cls, context: CommandContext, params: Dict) -> bool:
         current_video = context.state["video"]
         dialog = FrameRangeDialog(
-            title="Delete Instances in Frame Range...", max_frame_idx=len(current_video)
+            title="Delete Predictions Outside Frame Range",
+            max_frame_idx=len(current_video),
         )
         results = dialog.get_results()
         if results:
@@ -4315,6 +4424,123 @@ class DeleteSelectedInstanceTrack(EditCommand):
                 )
                 for inst in track_instances:
                     remove_instance(context.labels, instance=inst, lf=lf_i)
+
+
+class MergeInstances(EditCommand):
+    """Merge two user instances in the current frame into a single instance.
+
+    The currently selected instance (``context.state["instance"]``) is the
+    *survivor*. The instance to merge into it is the *donor*, taken from
+    ``params["donor"]``; if no donor is given and the frame has exactly two
+    user instances, the other one is used automatically.
+
+    For every skeleton node, if the survivor's node is missing (NaN coordinates
+    or not visible) and the donor's node is labeled/visible, the donor's
+    ``xy``/``visible``/``complete`` values are copied onto the survivor. This
+    lets a "front keypoints" instance and a "back keypoints" instance be
+    combined into one. The survivor keeps its own track.
+
+    Conflict policy: if BOTH the survivor and the donor have a node
+    labeled/visible, the survivor's value is kept (the donor's value for that
+    node is discarded).
+
+    Scope/behavior decisions:
+        - Only user ``Instance``s participate. ``PredictedInstance``s are never
+          chosen as survivor or donor and are left untouched on the frame.
+        - If there are fewer than two user instances, no donor can be resolved,
+          the survivor is not a user ``Instance``, or required state is
+          missing, this is a no-op (with a status message when running in the
+          GUI).
+        - After merging, the donor is removed from the frame *by identity* and
+          ``labels.update()`` is called. There is no dedicated undo (matching
+          ``DeleteSelectedInstance``/``PasteInstance``); ``EditCommand`` only
+          flags the project as having unsaved changes.
+    """
+
+    topics = [UpdateTopic.frame, UpdateTopic.project_instances]
+
+    @staticmethod
+    def _status(context: "CommandContext", message: str):
+        """Post a status message if the app supports it (no-op when headless)."""
+        if hasattr(context.app, "updateStatusMessage"):
+            context.app.updateStatusMessage(message)
+
+    @staticmethod
+    def do_action(context: "CommandContext", params: dict):
+        survivor = context.state["instance"]
+        frame = context.state["labeled_frame"]
+        skeleton = context.state["skeleton"]
+        donor = params.get("donor", None)
+        if donor is None:
+            # Donor picked by shift/ctrl-selecting a second instance in the list
+            # (first-selected is the survivor, second is the donor).
+            donor = context.state.get("merge_partner", default=None)
+
+        if survivor is None or frame is None or skeleton is None:
+            return
+
+        # Only user instances can be merged (skip PredictedInstance).
+        if type(survivor) is not Instance:
+            MergeInstances._status(
+                context, "Merge Instance: select a user instance first."
+            )
+            return
+
+        user_instances = frame.user_instances
+        if len(user_instances) < 2:
+            MergeInstances._status(
+                context,
+                "Merge Instance: need at least two user instances in the frame.",
+            )
+            return
+
+        # Fast path: exactly two user instances -> donor is the other one.
+        if donor is None and len(user_instances) == 2:
+            donor = next(inst for inst in user_instances if inst is not survivor)
+
+        if donor is None or donor is survivor or type(donor) is not Instance:
+            MergeInstances._status(
+                context, "Merge Instance: no valid instance to merge."
+            )
+            return
+
+        # Guard against mismatched skeletons (all instances in a frame normally
+        # share the project skeleton, but be safe).
+        if not survivor.skeleton.matches(donor.skeleton):
+            MergeInstances._status(
+                context, "Merge Instance: instances have different skeletons."
+            )
+            return
+
+        for node in skeleton.node_names:
+            s_pt = survivor[node]
+            d_pt = donor[node]
+            survivor_missing = bool(np.isnan(s_pt["xy"]).any()) or not bool(
+                s_pt["visible"]
+            )
+            donor_labeled = (not bool(np.isnan(d_pt["xy"]).any())) and bool(
+                d_pt["visible"]
+            )
+            # Conflict policy: only fill nodes the survivor is missing; nodes
+            # the survivor already has are kept as-is.
+            if survivor_missing and donor_labeled:
+                s_pt["xy"][0] = d_pt["xy"][0]
+                s_pt["xy"][1] = d_pt["xy"][1]
+                s_pt["visible"] = d_pt["visible"]
+                s_pt["complete"] = d_pt["complete"]
+
+        # Remove the donor *by identity* and persist. We must not use pose/track
+        # matching here (e.g. ``remove_instance``): after the merge the survivor
+        # can become pose-identical to the donor (when the donor's labeled nodes
+        # are a superset of the survivor's), so for untracked or same-track
+        # instances a pose-based search could remove the survivor instead. An
+        # ``is``-based filter is unambiguous regardless of ``Instance.__eq__``.
+        frame.instances[:] = [inst for inst in frame.instances if inst is not donor]
+        context.labels.update()
+
+        # Keep the survivor selected; clear the donor selection.
+        context.state["instance"] = survivor
+        context.state["merge_partner"] = None
 
 
 class DeleteDialogCommand(EditCommand):
@@ -4775,6 +5001,9 @@ class AddInstance(EditCommand):
         ):
             context.labels.tracks.append(new_instance.track)
 
+        # A frame with a real instance is not a background frame.
+        target_labeled_frame.is_negative = False
+
         if target_labeled_frame not in context.labels:
             context.labels.append(target_labeled_frame)
 
@@ -5114,6 +5343,71 @@ class AddInstance(EditCommand):
         return list(prev_lf.user_instances) + list(get_unused_predictions(prev_lf))
 
 
+class ToggleNegativeFrame(EditCommand):
+    """Mark or unmark the current frame as a negative (background) frame.
+
+    A negative frame is explicitly marked as containing no animals. It is used
+    as a background training example so the model learns to predict nothing on
+    empty frames, which reduces false positives.
+    """
+
+    topics = [UpdateTopic.frame]
+
+    @staticmethod
+    def ask(context: CommandContext, params: dict) -> bool:
+        lf = context.state["labeled_frame"]
+        if lf is None:
+            return False
+
+        params["was_negative"] = bool(lf.is_negative)
+
+        # Unmarking never needs confirmation.
+        if lf.is_negative:
+            return True
+
+        # Marking a frame that has instances destroys them, so confirm first.
+        n = len(lf.instances)
+        if n > 0:
+            frame_number = (context.state["frame_idx"] or 0) + 1
+            response = QtWidgets.QMessageBox.warning(
+                context.app,
+                "Mark frame as negative",
+                f"Frame {frame_number} has {n} instance(s). Marking it as a "
+                f"negative (background) frame will remove them.\n\nContinue?",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if response != QtWidgets.QMessageBox.Yes:
+                return False
+
+        return True
+
+    @classmethod
+    def do_action(cls, context: CommandContext, params: dict):
+        lf = context.state["labeled_frame"]
+        if lf is None:
+            return
+
+        if params["was_negative"]:
+            # Unmark the frame.
+            lf.is_negative = False
+            # Drop the now-empty frame so it does not linger as an orphan that
+            # `clean()` / training splits would silently discard.
+            if len(lf.instances) == 0 and lf in context.labels:
+                context.labels.labeled_frames.remove(lf)
+        else:
+            # Mark the frame: clear any instances and flag it.
+            lf.instances = []
+            lf.is_negative = True
+            # The current frame is often a detached `LabeledFrame` (created by
+            # `Labels.find(..., return_new=True)`); attach it or the flag is
+            # lost on the next replot/save.
+            if lf not in context.labels:
+                context.labels.append(lf)
+
+        context.labels.update()
+
+
 class SetInstancePointLocations(EditCommand):
     """Sets locations for node(s) for an instance.
 
@@ -5364,6 +5658,65 @@ class AddUserInstancesFromPredictions(EditCommand):
 
         return new_instance
 
+    @staticmethod
+    def fill_missing_predicted_nodes(new_instance: Instance):
+        """Position undetected (NaN) nodes with a force-directed layout, hidden.
+
+        The model leaves occluded nodes at NaN coordinates, and
+        ``make_instance_from_predicted_instance`` keeps them ``visible=False``
+        (correct -- the converted instance should look like the prediction). But
+        a NaN coordinate renders at a default/garbage location when the user
+        enables "show non-visible nodes" (``QtInstance`` still creates a node
+        item for every node in that mode, positioned at its ``xy``).
+
+        Spread the missing nodes with a force-directed (spring) layout of the
+        skeleton graph, centered on the detected keypoints' centroid and scaled
+        to their extent, so they sit on the animal -- spread out and grabbable --
+        regardless of how many nodes the model detected, while staying
+        ``visible=False``. (Template/alignment placement is unreliable when only
+        a few nodes are detected -- there is no way to infer where occluded nodes
+        are from a couple of visible ones -- so a force-directed layout, one of
+        the brand-new-instance init options, is used for robustness.)
+        Already-detected points, the track, and ``from_predicted`` are untouched.
+
+        No GUI player is required. No-op when every node was detected, or when
+        nothing was detected (no anchor for the layout center).
+
+        Args:
+            new_instance: The user ``Instance`` produced by
+                ``make_instance_from_predicted_instance``; modified in place.
+        """
+        import networkx as nx
+
+        xy = new_instance.points["xy"]
+        missing = np.isnan(xy).any(axis=1)
+        detected = ~missing
+        if not missing.any() or not detected.any():
+            return
+
+        det_xy = xy[detected]
+        center = det_xy.mean(axis=0)
+        extent = float(np.linalg.norm(det_xy.max(axis=0) - det_xy.min(axis=0)))
+        scale = max(extent / 2.0, 5.0)
+
+        skeleton = new_instance.skeleton
+        layout = nx.spring_layout(
+            to_graph(skeleton), center=center, scale=scale, seed=0
+        )
+        pos_by_name = {
+            (node if isinstance(node, str) else node.name): pos
+            for node, pos in layout.items()
+        }
+
+        miss_idx = np.nonzero(missing)[0]
+        fill_xy = np.array(
+            [pos_by_name.get(skeleton.node_names[i], center) for i in miss_idx],
+            dtype=float,
+        )
+        new_instance.points["xy"][missing] = fill_xy
+        new_instance.points["visible"][missing] = False
+        new_instance.points["complete"][missing] = False
+
     @classmethod
     def do_action(cls, context: CommandContext, params: dict):
         if context.state["labeled_frame"] is None:
@@ -5372,9 +5725,9 @@ class AddUserInstancesFromPredictions(EditCommand):
         new_instances = []
         unused_predictions = get_unused_predictions(context.state["labeled_frame"])
         for predicted_instance in unused_predictions:
-            new_instances.append(
-                cls.make_instance_from_predicted_instance(predicted_instance)
-            )
+            new_instance = cls.make_instance_from_predicted_instance(predicted_instance)
+            cls.fill_missing_predicted_nodes(new_instance)
+            new_instances.append(new_instance)
 
         # Add the instances
         for new_instance in new_instances:
@@ -5391,6 +5744,71 @@ class AddUserInstancesFromPredictions(EditCommand):
             if context.state["labeled_frame"] not in context.labels:
                 context.labels.append(context.state["labeled_frame"])
 
+            context.labels.update()
+
+
+class AddUserInstancesFromAllPredictions(EditCommand):
+    topics = [UpdateTopic.frame, UpdateTopic.project_instances]
+
+    @classmethod
+    def do_action(cls, context: CommandContext, params: dict):
+        labeled_frames = list(context.labels)
+        total_frames = len(labeled_frames)
+
+        if total_frames == 0:
+            return
+
+        qt_app = QtWidgets.QApplication.instance()
+        if qt_app is not None:
+            parent = context.app if isinstance(context.app, QtWidgets.QWidget) else None
+            win = QtWidgets.QProgressDialog(
+                "Accepting predictions...",
+                "Cancel",
+                0,
+                total_frames,
+                parent,
+            )
+            win.setWindowTitle("Accept All Predictions")
+            win.setWindowModality(QtCore.Qt.WindowModal)
+            win.setMinimumDuration(0)
+            win.setMinimumWidth(300)
+            win.show()
+            qt_app.processEvents()
+        else:
+            win = None
+
+        total_added = 0
+        existing_track_names = {track.name for track in context.labels.tracks}
+
+        for i, lf in enumerate(labeled_frames):
+            if win is not None and win.wasCanceled():
+                break
+
+            for predicted_instance in lf.unused_predictions:
+                make = AddUserInstancesFromPredictions
+                new_instance = make.make_instance_from_predicted_instance(
+                    predicted_instance
+                )
+                make.fill_missing_predicted_nodes(new_instance)
+                if new_instance not in lf.instances:
+                    lf.instances.append(new_instance)
+                    total_added += 1
+
+                if (
+                    new_instance.track is not None
+                    and new_instance.track.name not in existing_track_names
+                ):
+                    context.labels.tracks.append(new_instance.track)
+                    existing_track_names.add(new_instance.track.name)
+
+            if win is not None:
+                win.setValue(i + 1)
+                qt_app.processEvents()
+
+        if win is not None:
+            win.close()
+
+        if total_added > 0:
             context.labels.update()
 
 

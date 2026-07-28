@@ -42,6 +42,7 @@ from PIL import Image
 from sleap.gui.dataviews import (
     GenericTableModel,
     GenericTableView,
+    InstancesTableView,
     LabeledFrameTableModel,
     SkeletonEdgesTableModel,
     SkeletonNodeModel,
@@ -225,6 +226,8 @@ class VideosDock(DockWidget):
         hb = QHBoxLayout()
         self.add_button(hb, "Toggle Grayscale", main_window.commands.toggleGrayscale)
         self.add_button(hb, "Show Video", self.table.activateSelected)
+        self.add_button(hb, "Add Videos", main_window.commands.addVideo)
+        self.add_button(hb, "Replace Videos", main_window.commands.replaceVideo)
         self.add_button(hb, "Add Sessions", main_window.commands.addSession)
         self.add_button(hb, "Remove Video", main_window.commands.removeVideo)
         hbw = QWidget()
@@ -606,7 +609,9 @@ class InstancesDock(DockWidget):
         return self.model
 
     def create_tables(self) -> GenericTableView:
-        self.table = GenericTableView(
+        # InstancesTableView adds shift/ctrl multi-select so a second instance
+        # can be picked as the merge donor (see Merge Instance).
+        self.table = InstancesTableView(
             state=self.main_window.state,
             row_name="instance",
             name_prefix="",
@@ -621,7 +626,24 @@ class InstancesDock(DockWidget):
             lambda _: self._apply_mean_node_score_visibility(),
         )
 
+        # Keep the per-instance checkbox columns ("visibility"/"view only")
+        # narrow so they don't crowd out the informational columns.
+        self._size_checkbox_columns()
+
         return self.table
+
+    def _size_checkbox_columns(self) -> None:
+        """Resize the visibility/view-only checkbox columns to their contents."""
+        header = self.table.horizontalHeader()
+        for key in (
+            LabeledFrameTableModel.VISIBILITY_KEY,
+            LabeledFrameTableModel.VIEW_ONLY_KEY,
+        ):
+            try:
+                col_idx = self.model.properties.index(key)
+            except ValueError:
+                continue
+            header.setSectionResizeMode(col_idx, QHeaderView.ResizeToContents)
 
     def _apply_mean_node_score_visibility(self) -> None:
         """Hide or show the 'mean node score' column based on the View toggle."""
@@ -649,6 +671,9 @@ class InstancesDock(DockWidget):
         )
         self.add_button(
             hb, "Delete Instance", main_window.commands.deleteSelectedInstance
+        )
+        self.add_button(
+            hb, "Merge Instance", lambda *_: main_window.commands.mergeInstance()
         )
 
         hbw = QWidget()

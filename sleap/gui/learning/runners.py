@@ -8,6 +8,7 @@ from omegaconf import OmegaConf
 from copy import deepcopy
 import psutil
 import json
+import shlex
 import subprocess
 import tempfile
 import time
@@ -450,6 +451,15 @@ class InferenceWorker(QtCore.QThread):
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,  # Merge stderr into stdout
             text=True,  # Text mode (required for line buffering)
+            # Force UTF-8 decoding of the child's output. Without this, text mode
+            # decodes using the locale default, which is cp1252 on Windows, so any
+            # non-cp1252 byte in the subprocess output (e.g. the UTF-8 box-drawing
+            # glyphs in a `rich`-rendered traceback or progress bar) crashes the
+            # reader with `UnicodeDecodeError: 'charmap' codec can't decode byte ...`,
+            # masking the real error. `errors="replace"` keeps reading even if the
+            # child emits a stray non-UTF-8 byte. (gh discussion #2744)
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,  # Line buffered
             env=env,
         ) as proc:
@@ -915,6 +925,11 @@ class InferenceTask:
         if "_batch_size" in self.inference_params:
             cli_args.extend(["--batch_size", str(self.inference_params["_batch_size"])])
 
+        if "_peak_threshold" in self.inference_params:
+            cli_args.extend(
+                ["--peak_threshold", str(self.inference_params["_peak_threshold"])]
+            )
+
         if (
             "_max_instances" in self.inference_params
             and self.inference_params["_max_instances"] is not None
@@ -1012,7 +1027,9 @@ class InferenceTask:
             while proc.poll() is None:
                 # Read line.
                 line = proc.stdout.readline()
-                line = line.decode().rstrip()
+                # Decode as UTF-8 with replacement so a stray non-UTF-8 byte in
+                # the subprocess output can't crash the reader (see #2744).
+                line = line.decode("utf-8", errors="replace").rstrip()
 
                 is_json = False
                 if line.startswith("{"):
@@ -1083,9 +1100,9 @@ class InferenceTask:
         # See: https://sleap.ai/develop/api/sleap_io.model.labels.html#sleap_io.model.labels.Labels.merge
         prediction_mode = self.inference_params.get("_prediction_mode", "add")
         if prediction_mode == "replace":
-            self.labels.merge(new_labels, frame="replace_predictions")
+            self.labels.merge(new_labels, track="name", frame="replace_predictions")
         else:
-            self.labels.merge(new_labels, frame="keep_both")
+            self.labels.merge(new_labels, track="name", frame="keep_both")
 
         return len(self.results)
 
@@ -1186,13 +1203,28 @@ def write_pipeline_files(
                     ).as_posix()
                 )
 
-                # Add a line to the script for training this model
-                # Quote values to handle special characters in Hydra overrides
+                # Add a line to the script for training this model.
+                # Hydra overrides need literal quote characters around values
+                # containing special characters (e.g. "=" from run names like
+                # "run.n=181") to survive Hydra's own override grammar. Shell
+                # quoting alone doesn't do this: bash strips shell-level quotes
+                # before the value ever reaches Hydra's parser. So we embed a
+                # literal double-quote pair (Hydra accepts either quote style)
+                # in the override value itself, then use shlex.quote() to
+                # shell-escape the whole token with single quotes so the inner
+                # double quotes (and any other shell metacharacters) survive
+                # bash's argument parsing intact.
+                ckpt_dir_override = shlex.quote(
+                    f'trainer_config.ckpt_dir="{Path(ckpt_path).parent.as_posix()}"'
+                )
+                run_name_override = shlex.quote(
+                    f'trainer_config.run_name="{Path(ckpt_path).name}"'
+                )
                 train_script += (
                     f"sleap train --config-name {new_cfg_filename} "
                     f"--config-dir . "
-                    f"trainer_config.ckpt_dir='{Path(ckpt_path).parent.as_posix()}' "
-                    f"trainer_config.run_name='{Path(ckpt_path).name}' "
+                    f"{ckpt_dir_override} "
+                    f"{run_name_override} "
                     "\n"
                 )
 

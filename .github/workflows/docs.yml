@@ -1,7 +1,26 @@
 name: Deploy MkDocs to GitHub Pages
 
 on:
+  # Manual redeploy, e.g. to refresh a release's docs after a post-release fix
+  # lands on develop. Always builds from the dispatched branch (normally
+  # develop); the inputs only control the mike version label and alias. See
+  # talmolab/sleap#2693 (install-doc fix that shipped after the v1.6.3 tag).
   workflow_dispatch:
+    inputs:
+      version:
+        description: "mike version label to deploy (e.g. v1.6.3)"
+        required: true
+        type: string
+      alias:
+        description: "Alias to point at this version"
+        required: true
+        default: latest
+        type: choice
+        options:
+          - latest
+          - prerelease
+          - dev
+          - none
 
 # Serialize all gh-pages pushes (this workflow and pr-preview.yml's deploy/cleanup
 # jobs share the same group) so simultaneous pushes don't race and trip
@@ -18,12 +37,12 @@ jobs:
       contents: write
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
       - name: Setup UV
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: "3.13"
 
@@ -62,3 +81,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
             uv run mike deploy --update-aliases --allow-empty --push dev
+
+      - name: Build and upload docs (manual dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+            ALIAS="${{ inputs.alias }}"
+            if [ "$ALIAS" = "none" ]; then ALIAS=""; fi
+            uv run mike deploy --update-aliases --allow-empty --push "${{ inputs.version }}" $ALIAS

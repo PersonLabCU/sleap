@@ -231,3 +231,204 @@ def test_match_source_fps_checkbox(centered_pair_predictions):
         assert dialog.get_export_params()["fps"] == int(round(src_fps))
     finally:
         dialog.deleteLater()
+
+
+def test_include_unlabeled_returns_none_frame_indices(centered_pair_predictions):
+    """When "Include unlabeled frames" is checked, ``get_frame_indices()``
+    must return ``None`` so that ``sio.render_video()`` enumerates frames
+    from the video instead of restricting output to the labeled-only list.
+    """
+    pytest.importorskip("qtpy.QtWidgets")
+
+    from qtpy import QtWidgets
+
+    from sleap.gui.dialogs.render_clip import RenderClipDialog
+
+    _ = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    labels: sio.Labels = centered_pair_predictions
+    video = labels.videos[0]
+
+    dialog = RenderClipDialog(labels=labels, video=video)
+    try:
+        # Default is unchecked -> falls back to labeled-only behavior.
+        assert not dialog.include_unlabeled.isChecked()
+        assert isinstance(dialog.get_frame_indices(), list)
+
+        # Once checked, the dialog hands over driver responsibility to sleap-io.
+        dialog.include_unlabeled.setChecked(True)
+        assert dialog.get_frame_indices() is None
+    finally:
+        dialog.deleteLater()
+
+
+def test_include_unlabeled_export_params_forward_range(centered_pair_predictions):
+    """Checking "Include unlabeled frames" should add ``include_unlabeled=True``
+    to the export params, and a custom range should be forwarded with an
+    exclusive ``end`` (sleap-io's convention) so the user's inclusive UI value
+    maps correctly.
+    """
+    pytest.importorskip("qtpy.QtWidgets")
+
+    from qtpy import QtWidgets
+
+    from sleap.gui.dialogs.render_clip import RenderClipDialog
+
+    _ = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    labels: sio.Labels = centered_pair_predictions
+    video = labels.videos[0]
+
+    dialog = RenderClipDialog(labels=labels, video=video)
+    try:
+        # Unchecked path: no include_unlabeled key, no start/end.
+        params = dialog.get_export_params()
+        assert "include_unlabeled" not in params
+        assert "start" not in params
+        assert "end" not in params
+
+        # Checked + all-frames radio: include_unlabeled=True, no start/end so
+        # sleap-io renders the whole target video.
+        dialog.include_unlabeled.setChecked(True)
+        dialog.range_all.setChecked(True)
+        params = dialog.get_export_params()
+        assert params["include_unlabeled"] is True
+        assert "start" not in params
+        assert "end" not in params
+
+        # Checked + custom range: include_unlabeled=True with start/end+1 so
+        # the inclusive UI bound maps to sleap-io's exclusive end.
+        dialog.range_custom.setChecked(True)
+        dialog.start_frame.setValue(5)
+        dialog.end_frame.setValue(17)
+        params = dialog.get_export_params()
+        assert params["include_unlabeled"] is True
+        assert params["start"] == 5
+        assert params["end"] == 18
+    finally:
+        dialog.deleteLater()
+
+
+def test_trail_params_absent_when_disabled(centered_pair_predictions):
+    """With trails off (the default), no trail kwargs are forwarded so both the
+    preview and export keep sleap-io's ``show_trails=False`` default.
+    """
+    pytest.importorskip("qtpy.QtWidgets")
+
+    from qtpy import QtWidgets
+
+    from sleap.gui.dialogs.render_clip import RenderClipDialog
+
+    _ = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    labels: sio.Labels = centered_pair_predictions
+    video = labels.videos[0]
+
+    dialog = RenderClipDialog(labels=labels, video=video)
+    try:
+        assert not dialog.show_trails.isChecked()
+        params = dialog.get_export_params()
+        for key in (
+            "show_trails",
+            "trail_length",
+            "trail_node",
+            "trail_width",
+            "trail_alpha_fade",
+            "trail_alpha",
+            "trail_color",
+        ):
+            assert key not in params
+    finally:
+        dialog.deleteLater()
+
+
+def test_trail_params_forwarded_when_enabled(centered_pair_predictions):
+    """Enabling trails forwards the full sleap-io trail kwarg set with values
+    read from the widgets. ``trail_color`` is omitted for the "Match poses"
+    default (sleap-io then colors trails by track/instance).
+    """
+    pytest.importorskip("qtpy.QtWidgets")
+
+    from qtpy import QtWidgets
+
+    from sleap.gui.dialogs.render_clip import RenderClipDialog
+
+    _ = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+    labels: sio.Labels = centered_pair_predictions
+    video = labels.videos[0]
+
+    dialog = RenderClipDialog(labels=labels, video=video)
+    try:
+        # Node picker offers "Centroid" plus every skeleton node.
+        node_items = [
+            dialog.trail_node.itemData(i) for i in range(dialog.trail_node.count())
+        ]
+        assert node_items[0] == "centroid"
+        for node in labels.skeletons[0].nodes:
+            assert node.name in node_items
+
+        # Sub-controls disabled until the master toggle is on.
+        assert not dialog.trail_length.isEnabled()
+        dialog.show_trails.setChecked(True)
+        assert dialog.trail_length.isEnabled()
+
+        dialog.trail_length.setValue(25)
+        dialog.trail_node.setCurrentIndex(1)  # first real node
+        dialog.trail_width.setValue(3.5)
+        dialog.trail_alpha.setValue(0.5)
+        dialog.trail_fade.setChecked(False)
+
+        params = dialog.get_export_params()
+        assert params["show_trails"] is True
+        assert params["trail_length"] == 25
+        assert params["trail_node"] == labels.skeletons[0].nodes[0].name
+        assert params["trail_width"] == 3.5
+        assert params["trail_alpha"] == 0.5
+        assert params["trail_alpha_fade"] is False
+        # "Match poses" -> no uniform color forwarded.
+        assert "trail_color" not in params
+
+        # A named color is forwarded verbatim.
+        idx = dialog.trail_color.findData("red")
+        dialog.trail_color.setCurrentIndex(idx)
+        params = dialog.get_export_params()
+        assert params["trail_color"] == "red"
+    finally:
+        dialog.deleteLater()
+
+
+def test_trail_params_render_without_tracks():
+    """The trail params the dialog produces must actually render — including for
+    single-instance / untracked data, where sleap-io keys trails by instance
+    position (no tracks required). This guards the end-to-end passthrough into
+    ``sio.render_image``.
+    """
+    skel = _skeleton()
+    video = sio.Video(filename="a.mp4")
+
+    # Single moving instance across several frames, NO tracks assigned.
+    lfs = [
+        sio.LabeledFrame(
+            video=video, frame_idx=i, instances=[_pred(skel, (10.0 + i, 20.0 + i))]
+        )
+        for i in range(6)
+    ]
+    labels = sio.Labels(labeled_frames=lfs, videos=[video], skeletons=[skel])
+    assert len(labels.tracks) == 0
+
+    # Provide a solid background so no real video decode is needed.
+    img = sio.render_image(
+        labels,
+        video=video,
+        frame_idx=5,
+        background="black",
+        show_trails=True,
+        trail_length=5,
+        trail_node="centroid",
+        trail_width=2.0,
+        trail_alpha_fade=True,
+        trail_alpha=1.0,
+    )
+    assert img is not None
+    assert img.shape[-1] in (3, 4)
