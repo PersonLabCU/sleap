@@ -393,10 +393,11 @@ below if your clone is stored somewhere else:
 cd /d "D:\OneDrive - The University of Colorado Denver\Documents\Github\sleap"
 ```
 
-Recreate the `.venv` and install the project:
+Recreate the `.venv` and install both neural-network inference (`nn`) and
+triangulation (`anipose`) support:
 
 ```bat
-uv sync --extra nn
+uv sync --extra nn --extra anipose
 ```
 
 On an NVIDIA GPU computer, the preceding command may install the CPU-only
@@ -412,7 +413,13 @@ Activate the rebuilt environment:
 call .venv\Scripts\activate.bat
 ```
 
-Verify that PyTorch can use the GPU:
+Verify that triangulation support is installed:
+
+```bat
+python -c "import aniposelib; print('Triangulation support: ready')"
+```
+
+Then verify that PyTorch can use the GPU:
 
 ```bat
 python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
