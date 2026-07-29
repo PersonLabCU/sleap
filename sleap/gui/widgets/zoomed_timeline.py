@@ -325,6 +325,7 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._reach_edit_stage: str = ""
         self._reach_edit_index: int = -1
         self._reach_edit_frames: Dict[str, int] = {}
+        self._reach_edit_center_frame: int = 0
 
         # ── scene setup ──────────────────────────────────────────────────── #
         self._scene = QtWidgets.QGraphicsScene()
@@ -504,12 +505,20 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
     def _frame_to_x(self, frame: float) -> float:
         """Map a frame index to a pixel x-coordinate in the scene."""
         w = max(self.width(), 1)
-        return (frame - (self._curr_frame - self._span)) / (2 * self._span) * w
+        center = self._timeline_center_frame()
+        return (frame - (center - self._span)) / (2 * self._span) * w
 
     def _x_to_frame(self, x: float) -> int:
         """Map a pixel x-coordinate in the scene to a frame index."""
         w = max(self.width(), 1)
-        return int(round((x / w) * (2 * self._span) + self._curr_frame - self._span))
+        center = self._timeline_center_frame()
+        return int(round((x / w) * (2 * self._span) + center - self._span))
+
+    def _timeline_center_frame(self) -> int:
+        """Return the fixed display center used while curating a reach."""
+        if self._reach_edit_active:
+            return self._reach_edit_center_frame
+        return self._curr_frame
 
     # ── drawing ───────────────────────────────────────────────────────────── #
 
@@ -534,8 +543,9 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
 
     def _update_mark_paths(self) -> None:
         """Rebuild per-type QPainterPaths for marks visible in the current window."""
-        win_start = self._curr_frame - self._span
-        win_end = self._curr_frame + self._span
+        center = self._timeline_center_frame()
+        win_start = center - self._span
+        win_end = center + self._span
 
         for mtype, vals in self._sorted_marks_by_type.items():
             path = QPainterPath()
@@ -573,8 +583,9 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
                 spacing = sp
                 break
 
-        start_f = int((self._curr_frame - s) // spacing) * spacing
-        end_f = int(self._curr_frame + s + spacing)
+        center = self._timeline_center_frame()
+        start_f = int((center - s) // spacing) * spacing
+        end_f = int(center + s + spacing)
 
         prev_label_right = -999.0
         for f in range(start_f, end_f, spacing):
@@ -613,8 +624,9 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
             scene.removeItem(item)
         self._reach_items = []
 
-        win_start = self._curr_frame - self._span
-        win_end = self._curr_frame + self._span
+        center = self._timeline_center_frame()
+        win_start = center - self._span
+        win_end = center + self._span
 
         for reach in self._reaches:
             if reach.end_frame < win_start or reach.frame > win_end:
@@ -665,7 +677,6 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
             return
 
         stage_text = {
-            "select": "Select reach",
             "start": "Set start",
             "max": "Set max",
             "end": "Set end",
@@ -729,8 +740,9 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
             scene.removeItem(item)
         self._event_items = []
 
-        win_start = self._curr_frame - self._span
-        win_end = self._curr_frame + self._span
+        center = self._timeline_center_frame()
+        win_start = center - self._span
+        win_end = center + self._span
 
         for evt in self._events:
             frame = int(evt["frame"])
@@ -772,7 +784,9 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         frame = self._x_to_frame(x)
         frame = max(0, min(frame, self._total_frames - 1))
 
-        if self._is_scrubbing and event.buttons() & Qt.LeftButton:
+        if self._reach_edit_active:
+            self._state["frame_idx"] = frame
+        elif self._is_scrubbing and event.buttons() & Qt.LeftButton:
             frame_delta = round(
                 (x - self._scrub_start_x)
                 * (2 * self._span)
@@ -844,12 +858,13 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
 
     def _start_reach_edit(self) -> None:
         self._is_scrubbing = False
+        self._reach_edit_center_frame = int(self._curr_frame)
         self._reach_edit_active = True
-        self._reach_edit_stage = "select"
+        self._reach_edit_stage = "start"
         self._reach_edit_index = -1
         self._reach_edit_frames = {}
         self.setCursor(Qt.CrossCursor)
-        self._update_reach_edit_preview()
+        self._full_redraw()
 
     def _cancel_reach_edit(self) -> None:
         self._reach_edit_active = False
@@ -857,11 +872,14 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._reach_edit_index = -1
         self._reach_edit_frames = {}
         self.unsetCursor()
-        self._update_reach_edit_preview()
+        self._full_redraw()
 
     def _handle_reach_edit_click(self, event) -> None:
-        if self._reach_edit_stage == "select":
-            idx = self._reach_index_at(float(event.pos().x()), float(event.pos().y()))
+        frame = self._reachable_frame(self._x_to_frame(float(event.pos().x())))
+        self._state["frame_idx"] = frame
+
+        if self._reach_edit_stage == "start":
+            idx = self._reach_index_at_frame(frame)
             if idx >= 0:
                 reach = self._reaches[idx]
                 self._reach_edit_index = idx
@@ -870,32 +888,16 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
                     "max": int(reach.max_frame),
                     "end": int(reach.end_frame),
                 }
-                self._state["frame_idx"] = int(reach.frame)
             else:
-                frame = self._x_to_frame(event.pos().x())
-                frame = max(0, min(frame, self._total_frames - 1))
                 self._reach_edit_index = -1
-                self._reach_edit_frames = self._initial_new_reach_frames(frame)
-                self._state["frame_idx"] = frame
-            self._reach_edit_stage = "start"
-            self._update_reach_edit_preview()
-            event.accept()
-            return
-
-        if self._reach_edit_stage == "start":
-            self._reach_edit_frames["start"] = int(self._curr_frame)
+                self._reach_edit_frames = {}
+            self._reach_edit_frames["start"] = frame
             self._reach_edit_stage = "max"
-            self._state["frame_idx"] = self._reachable_frame(
-                self._reach_edit_frames.get("max", self._curr_frame)
-            )
         elif self._reach_edit_stage == "max":
-            self._reach_edit_frames["max"] = int(self._curr_frame)
+            self._reach_edit_frames["max"] = frame
             self._reach_edit_stage = "end"
-            self._state["frame_idx"] = self._reachable_frame(
-                self._reach_edit_frames.get("end", self._curr_frame)
-            )
         elif self._reach_edit_stage == "end":
-            self._reach_edit_frames["end"] = int(self._curr_frame)
+            self._reach_edit_frames["end"] = frame
             frames = self._normalized_reach_edit_frames(self._reach_edit_frames)
             self.reachEditRequested.emit(
                 int(self._reach_edit_index),
@@ -907,25 +909,11 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._update_reach_edit_preview()
         event.accept()
 
-    def _reach_index_at(self, x: float, y: float) -> int:
-        if y < _REACH_Y - 3 or y > _REACH_Y + _REACH_H + 3:
-            return -1
-        frame = self._x_to_frame(x)
+    def _reach_index_at_frame(self, frame: int) -> int:
         for idx, reach in enumerate(self._reaches):
             if int(reach.frame) <= frame <= int(reach.end_frame):
                 return idx
         return -1
-
-    def _initial_new_reach_frames(self, frame: int) -> Dict[str, int]:
-        last = max(0, self._total_frames - 1)
-        start = max(0, min(int(frame), last))
-        max_frame = max(start + 1, start)
-        end = max(start + 3, max_frame + 1)
-        if end > last:
-            end = last
-            max_frame = max(0, min(max_frame, end - 1))
-            start = max(0, min(start, max_frame - 1, end - 3))
-        return {"start": start, "max": max_frame, "end": end}
 
     def _reachable_frame(self, frame: int) -> int:
         return max(0, min(int(frame), self._total_frames - 1))

@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import sleap_io as sio
 
 from sleap.gui.state import GuiState
+from sleap.gui.reach_detection import ReachOutcome, ReachSegment
 from sleap.gui.widgets.video import (
     GraphicsView,
     QtVideoPlayer,
@@ -169,6 +170,87 @@ def test_reach_trace_plot_matches_timeline_span_and_frame():
     finally:
         vp.cleanup()
         assert vp.close()
+
+
+def test_timeline_reach_edit_uses_three_clicks_without_frame_jumps(qtbot):
+    state = GuiState()
+    state["frame_idx"] = 50
+    vp = QtVideoPlayer(state=state)
+    qtbot.addWidget(vp)
+    timeline = vp.zoomed_timeline
+    timeline.resize(400, timeline.height())
+    timeline.set_total_frames(150)
+    timeline.set_span(50)
+
+    timeline._start_reach_edit()
+    assert timeline._reach_edit_stage == "start"
+
+    start_event = FakeGraphicsMouseEvent(
+        QtCore.QPointF(timeline._frame_to_x(60), 10)
+    )
+    timeline._handle_reach_edit_click(start_event)
+    assert timeline._reach_edit_stage == "max"
+    assert timeline._reach_edit_frames == {"start": 60}
+    assert state["frame_idx"] == 60
+
+    max_event = FakeGraphicsMouseEvent(
+        QtCore.QPointF(timeline._frame_to_x(70), 10)
+    )
+    timeline._handle_reach_edit_click(max_event)
+    assert timeline._reach_edit_stage == "end"
+    assert timeline._reach_edit_frames == {"start": 60, "max": 70}
+    assert state["frame_idx"] == 70
+
+    with qtbot.waitSignal(timeline.reachEditRequested) as emitted:
+        end_event = FakeGraphicsMouseEvent(
+            QtCore.QPointF(timeline._frame_to_x(80), 10)
+        )
+        timeline._handle_reach_edit_click(end_event)
+
+    assert emitted.args == [-1, 60, 70, 80]
+    assert not timeline._reach_edit_active
+    assert state["frame_idx"] == 80
+
+    vp.cleanup()
+    assert vp.close()
+
+
+def test_timeline_reach_edit_scrubs_and_edits_current_reach(qtbot):
+    state = GuiState()
+    state["frame_idx"] = 50
+    vp = QtVideoPlayer(state=state)
+    qtbot.addWidget(vp)
+    timeline = vp.zoomed_timeline
+    timeline.resize(400, timeline.height())
+    timeline.set_total_frames(150)
+    timeline.set_span(50)
+    timeline.set_reaches(
+        [ReachSegment(40, 20, 40, ReachOutcome.UNCLASSIFIED)]
+    )
+
+    timeline._start_reach_edit()
+    hover_x = timeline._frame_to_x(55)
+    move_event = QMouseEvent(
+        QtCore.QEvent.MouseMove,
+        QtCore.QPointF(hover_x, 10),
+        QtCore.Qt.NoButton,
+        QtCore.Qt.NoButton,
+        QtCore.Qt.NoModifier,
+    )
+    timeline.mouseMoveEvent(move_event)
+
+    assert state["frame_idx"] == 55
+    assert timeline._x_to_frame(hover_x) == 55
+
+    start_event = FakeGraphicsMouseEvent(QtCore.QPointF(hover_x, 10))
+    timeline._handle_reach_edit_click(start_event)
+    assert timeline._reach_edit_index == 0
+    assert timeline._reach_edit_stage == "max"
+    assert timeline._reach_edit_frames == {"start": 55, "max": 60, "end": 80}
+    assert state["frame_idx"] == 55
+
+    vp.cleanup()
+    assert vp.close()
 
 
 def test_inner_bounding_box_drag_requires_shift(qtbot, centered_pair_labels):

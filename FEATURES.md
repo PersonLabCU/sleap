@@ -464,12 +464,11 @@ Timeline edit flow:
 
 1. Hover over the timeline.
 2. Press `r`.
-3. Click an existing reach bar to edit it, or click empty timeline space to add
-   a new reach.
-4. Use left/right keys to adjust the current frame.
-5. Left-click to lock `Start`.
-6. Adjust and left-click to lock `Max`.
-7. Adjust and left-click to lock `End`.
+3. Move the mouse left or right to scrub the video to the desired `Start`
+   frame, then left-click. If that frame is inside an existing reach, that
+   reach is edited; otherwise, a new reach is started.
+4. Move the mouse and left-click to lock `Max`.
+5. Move the mouse and left-click to lock `End`.
 
 Edited reaches keep their previous outcome. Newly added reaches are
 `Unclassified`. The reach table and timeline update immediately.
