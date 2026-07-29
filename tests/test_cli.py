@@ -3,6 +3,7 @@
 This module tests the main CLI entry point and sleap-io command integration.
 """
 
+import pytest
 from click.testing import CliRunner
 
 from sleap.cli import cli
@@ -33,6 +34,19 @@ class TestCLIBasics:
         result = runner.invoke(cli, ["label", "--help"])
         assert result.exit_code == 0
         assert "Launch the SLEAP labeling GUI" in result.output
+
+    def test_track_help_includes_gui_when_core_sleap_nn_is_available(self):
+        """A missing optional export command must not disable GUI inference."""
+        try:
+            from sleap_nn.cli import track as _track
+        except ImportError:
+            pytest.skip("sleap-nn core CLI is not installed")
+
+        assert _track is not None
+        runner = CliRunner()
+        result = runner.invoke(cli, ["track", "--help"])
+        assert result.exit_code == 0
+        assert "--gui" in result.output
 
     def test_doctor_help(self):
         """Verify doctor command help displays correctly."""

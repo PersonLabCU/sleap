@@ -60,7 +60,9 @@ from sleap_io.io.cli import (
     export as sio_export,
 )
 
-# Import sleap-nn CLI commands for integration (optional, requires sleap-nn)
+# Import sleap-nn CLI commands for integration (optional, requires sleap-nn).
+# Keep core, export, and prediction availability independent so a missing
+# optional export command does not disable training and tracking.
 try:
     from sleap_nn.cli import (
         train as nn_train,
@@ -68,14 +70,24 @@ try:
         eval as nn_eval,
         system as nn_system,
     )
-    from sleap_nn.export.cli import (
-        export as nn_export,
-        predict as nn_predict,
-    )
 
     _SLEAP_NN_AVAILABLE = True
 except ImportError:
     _SLEAP_NN_AVAILABLE = False
+
+try:
+    from sleap_nn.export.cli import export as nn_export
+
+    _SLEAP_NN_EXPORT_AVAILABLE = True
+except ImportError:
+    _SLEAP_NN_EXPORT_AVAILABLE = False
+
+try:
+    from sleap_nn.export.cli import predict as nn_predict
+
+    _SLEAP_NN_PREDICT_AVAILABLE = True
+except ImportError:
+    _SLEAP_NN_PREDICT_AVAILABLE = False
 
 
 # =============================================================================
@@ -1214,13 +1226,21 @@ if _SLEAP_NN_AVAILABLE:
     cli.add_command(wrap_nn_command(nn_train), name="train")
     cli.add_command(wrap_nn_command(nn_track), name="track")
     cli.add_command(wrap_nn_command(nn_eval), name="eval")
-    cli.add_command(wrap_nn_command(nn_export), name="export-model")
-    cli.add_command(wrap_nn_command(nn_predict), name="predict")
     cli.add_command(wrap_nn_command(nn_system), name="system")
 else:
     # Register stub commands that show helpful error messages
-    for cmd_name in ["train", "track", "eval", "export-model", "predict", "system"]:
+    for cmd_name in ["train", "track", "eval", "system"]:
         cli.add_command(_make_nn_stub(cmd_name), name=cmd_name)
+
+if _SLEAP_NN_EXPORT_AVAILABLE:
+    cli.add_command(wrap_nn_command(nn_export), name="export-model")
+else:
+    cli.add_command(_make_nn_stub("export-model"), name="export-model")
+
+if _SLEAP_NN_PREDICT_AVAILABLE:
+    cli.add_command(wrap_nn_command(nn_predict), name="predict")
+else:
+    cli.add_command(_make_nn_stub("predict"), name="predict")
 
 
 # =============================================================================
