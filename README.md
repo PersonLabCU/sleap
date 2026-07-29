@@ -189,3 +189,4 @@ SLEAP is released under a [BSD 3-Clause Clear License](LICENSE).
 
 ## Activate virtual environment
 .venv\Scripts\activate.bat
+call .venv\Scripts\activate.bat
