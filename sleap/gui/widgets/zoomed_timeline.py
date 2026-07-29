@@ -9,7 +9,7 @@ QGraphicsView/QGraphicsScene infrastructure (no extra dependencies required).
 """
 
 from bisect import bisect_left, bisect_right
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 from qtpy import QtCore, QtWidgets
@@ -298,6 +298,7 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
     """
 
     reachEditRequested = QtCore.Signal(int, int, int, int)
+    reachDeleteRequested = QtCore.Signal(int)
     eventNamesChanged = QtCore.Signal(list)
     reachesChanged = QtCore.Signal(bool)
 
@@ -322,10 +323,12 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._scrub_start_x: float = 0.0
         self._scrub_start_frame: int = 0
         self._reach_edit_active: bool = False
+        self._reach_edit_tool: str = ""
         self._reach_edit_stage: str = ""
         self._reach_edit_index: int = -1
         self._reach_edit_frames: Dict[str, int] = {}
         self._reach_edit_center_frame: int = 0
+        self._reach_drag_handle: str = ""
 
         # ── scene setup ──────────────────────────────────────────────────── #
         self._scene = QtWidgets.QGraphicsScene()
@@ -477,6 +480,7 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._reaches = list(reaches or [])
         self.reachesChanged.emit(bool(self._reaches))
         self._update_reach_bars()
+        self._update_reach_edit_preview()
 
     def jump_to_reach(self, direction: int) -> bool:
         """Move the current frame to the previous or next reach start."""
@@ -676,14 +680,22 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
             self._edit_lbl.hide()
             return
 
-        stage_text = {
-            "start": "Set start",
-            "max": "Set max",
-            "end": "Set end",
-        }.get(self._reach_edit_stage, "")
+        if self._reach_edit_tool == "delete":
+            stage_text = "Delete reach"
+        elif self._reach_edit_tool == "drag":
+            stage_text = "Drag start/max/end"
+        else:
+            stage_text = {
+                "start": "Set start",
+                "max": "Set max",
+                "end": "Set end",
+            }.get(self._reach_edit_stage, "")
         self._edit_lbl.setText(stage_text)
         self._edit_lbl.setPos(4, _REACH_Y + _REACH_H + 3)
         self._edit_lbl.show()
+
+        if self._reach_edit_tool == "drag":
+            self._draw_reach_drag_handles()
 
         frames = dict(self._reach_edit_frames)
         if self._reach_edit_stage in {"start", "max", "end"}:
@@ -733,6 +745,36 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
             text.setZValue(22)
             self._reach_edit_items.append(text)
 
+    def _draw_reach_drag_handles(self) -> None:
+        """Draw draggable start, max, and end handles for visible reaches."""
+        win_start = self._timeline_center_frame() - self._span
+        win_end = self._timeline_center_frame() + self._span
+        handle_defs = (
+            ("start", QColor(250, 204, 21)),
+            ("max", QColor(255, 255, 255)),
+            ("end", QColor(248, 113, 113)),
+        )
+        for reach in self._reaches:
+            if reach.end_frame < win_start or reach.frame > win_end:
+                continue
+            frames = {
+                "start": int(reach.frame),
+                "max": int(reach.max_frame),
+                "end": int(reach.end_frame),
+            }
+            for handle, color in handle_defs:
+                x = self._frame_to_x(frames[handle])
+                pen = QPen(color, 1.5)
+                pen.setCosmetic(True)
+                item = self._scene.addEllipse(
+                    QRectF(x - 4, _REACH_Y + 2, 8, 8),
+                    pen,
+                    QBrush(color.darker(150)),
+                )
+                item.setToolTip(f"Drag reach {handle}")
+                item.setZValue(23)
+                self._reach_edit_items.append(item)
+
     def _update_event_items(self) -> None:
         """Rebuild event-marker triangles for the visible window."""
         scene = self._scene
@@ -766,7 +808,12 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.LeftButton:
             if self._reach_edit_active:
-                self._handle_reach_edit_click(event)
+                if self._reach_edit_tool == "delete":
+                    self._handle_reach_delete_click(event)
+                elif self._reach_edit_tool == "drag":
+                    self._start_reach_handle_drag(event)
+                else:
+                    self._handle_reach_edit_click(event)
                 return
             frame = self._x_to_frame(event.pos().x())
             frame = max(0, min(frame, self._total_frames - 1))
@@ -784,7 +831,15 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         frame = self._x_to_frame(x)
         frame = max(0, min(frame, self._total_frames - 1))
 
-        if self._reach_edit_active:
+        dragging_handle = bool(
+            self._reach_edit_tool == "drag"
+            and bool(self._reach_drag_handle)
+            and event.buttons() & Qt.LeftButton
+        )
+        if dragging_handle:
+            frame = self._update_reach_drag_frame(frame)
+            self._state["frame_idx"] = frame
+        elif self._reach_edit_active:
             self._state["frame_idx"] = frame
         elif self._is_scrubbing and event.buttons() & Qt.LeftButton:
             frame_delta = round(
@@ -811,9 +866,33 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._cursor_lbl.setPos(lbl_x, 2)
         self._cursor_lbl.show()
 
+        if dragging_handle:
+            event.accept()
+            return
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:
+        if (
+            event.button() == Qt.LeftButton
+            and self._reach_edit_tool == "drag"
+            and self._reach_drag_handle
+        ):
+            frame = self._reachable_frame(self._x_to_frame(float(event.pos().x())))
+            frame = self._update_reach_drag_frame(frame)
+            self._state["frame_idx"] = frame
+            frames = self._normalized_reach_edit_frames(self._reach_edit_frames)
+            self.reachEditRequested.emit(
+                int(self._reach_edit_index),
+                frames["start"],
+                frames["max"],
+                frames["end"],
+            )
+            self._reach_edit_index = -1
+            self._reach_edit_frames = {}
+            self._reach_drag_handle = ""
+            self._update_reach_edit_preview()
+            event.accept()
+            return
         if event.button() == Qt.LeftButton and self._is_scrubbing:
             self._is_scrubbing = False
             event.accept()
@@ -842,6 +921,14 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
                 self._cancel_reach_edit()
                 event.accept()
                 return
+            if event.key() == Qt.Key.Key_D:
+                self._start_reach_delete()
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_E:
+                self._start_reach_drag()
+                event.accept()
+                return
             if event.key() in (Qt.Key.Key_Left, Qt.Key.Key_Right):
                 step = -1 if event.key() == Qt.Key.Key_Left else 1
                 frame = max(0, min(self._curr_frame + step, self._total_frames - 1))
@@ -860,17 +947,41 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
         self._is_scrubbing = False
         self._reach_edit_center_frame = int(self._curr_frame)
         self._reach_edit_active = True
+        self._reach_edit_tool = "place"
         self._reach_edit_stage = "start"
         self._reach_edit_index = -1
         self._reach_edit_frames = {}
+        self._reach_drag_handle = ""
         self.setCursor(Qt.CrossCursor)
         self._full_redraw()
 
-    def _cancel_reach_edit(self) -> None:
-        self._reach_edit_active = False
+    def _start_reach_delete(self) -> None:
+        """Switch active reach curation to click-to-delete mode."""
+        self._reach_edit_tool = "delete"
         self._reach_edit_stage = ""
         self._reach_edit_index = -1
         self._reach_edit_frames = {}
+        self._reach_drag_handle = ""
+        self.setCursor(Qt.CrossCursor)
+        self._update_reach_edit_preview()
+
+    def _start_reach_drag(self) -> None:
+        """Switch active reach curation to handle-drag mode."""
+        self._reach_edit_tool = "drag"
+        self._reach_edit_stage = ""
+        self._reach_edit_index = -1
+        self._reach_edit_frames = {}
+        self._reach_drag_handle = ""
+        self.setCursor(Qt.SizeHorCursor)
+        self._update_reach_edit_preview()
+
+    def _cancel_reach_edit(self) -> None:
+        self._reach_edit_active = False
+        self._reach_edit_tool = ""
+        self._reach_edit_stage = ""
+        self._reach_edit_index = -1
+        self._reach_edit_frames = {}
+        self._reach_drag_handle = ""
         self.unsetCursor()
         self._full_redraw()
 
@@ -908,6 +1019,77 @@ class ZoomedTimelineWidget(QtWidgets.QGraphicsView):
             self._cancel_reach_edit()
         self._update_reach_edit_preview()
         event.accept()
+
+    def _handle_reach_delete_click(self, event) -> None:
+        idx = self._reach_index_at_position(
+            float(event.pos().x()),
+            float(event.pos().y()),
+        )
+        if idx >= 0:
+            self.reachDeleteRequested.emit(idx)
+        event.accept()
+
+    def _start_reach_handle_drag(self, event) -> None:
+        idx, handle = self._reach_handle_at_position(
+            float(event.pos().x()),
+            float(event.pos().y()),
+        )
+        if idx < 0:
+            event.accept()
+            return
+
+        reach = self._reaches[idx]
+        self._reach_edit_index = idx
+        self._reach_edit_frames = {
+            "start": int(reach.frame),
+            "max": int(reach.max_frame),
+            "end": int(reach.end_frame),
+        }
+        self._reach_drag_handle = handle
+        self._state["frame_idx"] = self._reach_edit_frames[handle]
+        self._update_reach_edit_preview()
+        event.accept()
+
+    def _update_reach_drag_frame(self, frame: int) -> int:
+        """Move the active handle while keeping start < max < end."""
+        frame = self._reachable_frame(frame)
+        start = self._reach_edit_frames["start"]
+        max_frame = self._reach_edit_frames["max"]
+        end = self._reach_edit_frames["end"]
+
+        if self._reach_drag_handle == "start":
+            frame = max(0, min(frame, max_frame - 1, end - 3))
+        elif self._reach_drag_handle == "max":
+            frame = max(start + 1, min(frame, end - 1))
+        elif self._reach_drag_handle == "end":
+            last = max(0, self._total_frames - 1)
+            frame = max(max_frame + 1, start + 3, min(frame, last))
+
+        self._reach_edit_frames[self._reach_drag_handle] = int(frame)
+        self._update_reach_edit_preview()
+        return int(frame)
+
+    def _reach_index_at_position(self, x: float, y: float) -> int:
+        if y < _REACH_Y - 3 or y > _REACH_Y + _REACH_H + 3:
+            return -1
+        return self._reach_index_at_frame(self._x_to_frame(x))
+
+    def _reach_handle_at_position(self, x: float, y: float) -> Tuple[int, str]:
+        if y < _REACH_Y - 4 or y > _REACH_Y + _REACH_H + 4:
+            return -1, ""
+
+        nearest = (-1, "", 8.0)
+        for idx, reach in enumerate(self._reaches):
+            handle_frames = (
+                ("start", int(reach.frame)),
+                ("max", int(reach.max_frame)),
+                ("end", int(reach.end_frame)),
+            )
+            for handle, frame in handle_frames:
+                distance = abs(self._frame_to_x(frame) - x)
+                if distance < nearest[2]:
+                    nearest = (idx, handle, distance)
+        return nearest[0], nearest[1]
 
     def _reach_index_at_frame(self, frame: int) -> int:
         for idx, reach in enumerate(self._reaches):

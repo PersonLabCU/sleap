@@ -1989,6 +1989,20 @@ class ReachesDock(DockWidget):
         self._notify_reaches_changed()
         self._status_label.setText(f"{len(self._reaches)} reach(es) remaining.")
 
+    def delete_reach(self, row: int) -> None:
+        """Delete one reach selected from the timeline."""
+        row = int(row)
+        if not 0 <= row < len(self._reaches):
+            return
+        self._reaches.pop(row)
+        if row < len(self._reach_details):
+            self._reach_details.pop(row)
+        self._populate_table()
+        self._notify_reaches_changed()
+        self._status_label.setText(
+            f"Deleted reach. {len(self._reaches)} reach(es) remaining."
+        )
+
     def _delete_all(self) -> None:
         self._reaches = []
         self._reach_details = []

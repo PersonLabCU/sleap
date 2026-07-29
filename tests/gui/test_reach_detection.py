@@ -460,6 +460,30 @@ def test_reaches_dock_upsert_reach_updates_table_and_sort(qtbot):
     assert dock._reach_details[0]["curation"] == "manual_add"
 
 
+def test_reaches_dock_delete_reach_updates_table_and_timeline(qtbot):
+    dock = ReachesDock.__new__(ReachesDock)
+    dock._reaches = [
+        ReachSegment(5, 2, 6, ReachOutcome.MISSED),
+        ReachSegment(20, 4, 9, ReachOutcome.GRABBED),
+    ]
+    dock._reach_details = [{"frame": 5}, {"frame": 20}]
+    dock._results_table = QTableWidget(0, 5)
+    dock._status_label = QLabel()
+    calls = []
+    dock.on_reaches_changed = lambda reaches: calls.append(list(reaches))
+    dock._populate_table()
+
+    dock.delete_reach(0)
+
+    assert dock._reaches == [
+        ReachSegment(20, 4, 9, ReachOutcome.GRABBED)
+    ]
+    assert dock._reach_details == [{"frame": 20}]
+    assert dock._results_table.rowCount() == 1
+    assert calls[-1] == dock._reaches
+    assert dock._status_label.text() == "Deleted reach. 1 reach(es) remaining."
+
+
 def test_reaches_dock_filter_hand_trajectories_preserves_nan(qtbot):
     dock = ReachesDock.__new__(ReachesDock)
     dock._filter_hand_traces = QCheckBox()

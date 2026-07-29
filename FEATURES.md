@@ -470,6 +470,12 @@ Timeline edit flow:
 4. Move the mouse and left-click to lock `Max`.
 5. Move the mouse and left-click to lock `End`.
 
+While reach-edit mode is active:
+
+- Press `d`, then click a reach bar to delete that reach.
+- Press `e`, then drag a reach's `Start`, `Max`, or `End` handle to move it.
+- Press `Esc` to leave reach-edit mode.
+
 Edited reaches keep their previous outcome. Newly added reaches are
 `Unclassified`. The reach table and timeline update immediately.
 

@@ -253,6 +253,78 @@ def test_timeline_reach_edit_scrubs_and_edits_current_reach(qtbot):
     assert vp.close()
 
 
+def test_timeline_reach_delete_mode_emits_clicked_reach(qtbot):
+    state = GuiState()
+    state["frame_idx"] = 50
+    vp = QtVideoPlayer(state=state)
+    qtbot.addWidget(vp)
+    timeline = vp.zoomed_timeline
+    timeline.resize(400, timeline.height())
+    timeline.set_total_frames(150)
+    timeline.set_span(50)
+    timeline.set_reaches(
+        [ReachSegment(40, 20, 40, ReachOutcome.UNCLASSIFIED)]
+    )
+    deleted_rows = []
+    timeline.reachDeleteRequested.connect(deleted_rows.append)
+
+    timeline._start_reach_edit()
+    qtbot.keyClick(timeline, QtCore.Qt.Key.Key_D)
+    delete_event = FakeGraphicsMouseEvent(
+        QtCore.QPointF(timeline._frame_to_x(65), 50)
+    )
+    timeline.mousePressEvent(delete_event)
+
+    assert deleted_rows == [0]
+    assert timeline._reach_edit_tool == "delete"
+
+    vp.cleanup()
+    assert vp.close()
+
+
+def test_timeline_reach_drag_mode_moves_existing_handle(qtbot):
+    state = GuiState()
+    state["frame_idx"] = 50
+    vp = QtVideoPlayer(state=state)
+    qtbot.addWidget(vp)
+    timeline = vp.zoomed_timeline
+    timeline.resize(400, timeline.height())
+    timeline.set_total_frames(150)
+    timeline.set_span(50)
+    timeline.set_reaches(
+        [ReachSegment(40, 20, 40, ReachOutcome.UNCLASSIFIED)]
+    )
+    edits = []
+    timeline.reachEditRequested.connect(lambda *args: edits.append(list(args)))
+
+    timeline._start_reach_edit()
+    qtbot.keyClick(timeline, QtCore.Qt.Key.Key_E)
+    for handle, frame in (("start", 40), ("max", 60), ("end", 80)):
+        assert timeline._reach_handle_at_position(
+            timeline._frame_to_x(frame), 50
+        ) == (0, handle)
+
+    press_event = FakeGraphicsMouseEvent(
+        QtCore.QPointF(timeline._frame_to_x(60), 50)
+    )
+    timeline.mousePressEvent(press_event)
+    assert timeline._reach_drag_handle == "max"
+
+    move_event = FakeGraphicsMouseEvent(
+        QtCore.QPointF(timeline._frame_to_x(70), 50)
+    )
+    timeline.mouseMoveEvent(move_event)
+    timeline.mouseReleaseEvent(move_event)
+
+    assert edits == [[0, 40, 70, 80]]
+    assert timeline._reach_edit_active
+    assert timeline._reach_edit_tool == "drag"
+    assert timeline._reach_drag_handle == ""
+
+    vp.cleanup()
+    assert vp.close()
+
+
 def test_inner_bounding_box_drag_requires_shift(qtbot, centered_pair_labels):
     vp = QtVideoPlayer(centered_pair_labels.video)
     qtbot.addWidget(vp)

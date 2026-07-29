@@ -1324,6 +1324,9 @@ class MainWindow(QMainWindow):
         self.player.zoomed_timeline.reachEditRequested.connect(
             self.reaches_dock.upsert_reach
         )
+        self.player.zoomed_timeline.reachDeleteRequested.connect(
+            self.reaches_dock.delete_reach
+        )
         # Clear reaches when the video changes
         self.state.connect(
             "video",
