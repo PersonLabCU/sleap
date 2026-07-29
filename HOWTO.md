@@ -377,20 +377,66 @@ sleap doctor
 
 This commonly happens when the repository and `.venv` are stored inside
 OneDrive. First close SLEAP, Python, Jupyter, and any editor using the
-environment. Then deactivate it:
+environment. Then deactivate it if the command is still available:
 
 ```bash
 deactivate
 ```
 
 Delete only the repository's `.venv` folder in File Explorer. Do not delete the
-repository itself. Move or re-clone the repository somewhere outside OneDrive,
-such as `C:\repos\sleap`, and recreate the environment:
+repository itself.
 
-```bash
-uv sync --extra nn --extra anipose --extra jupyter
-uv run sleap
+From Command Prompt, return to the repository folder. Replace the example path
+below if your clone is stored somewhere else:
+
+```bat
+cd /d "D:\OneDrive - The University of Colorado Denver\Documents\Github\sleap"
 ```
+
+Recreate the `.venv` and install the project:
+
+```bat
+uv sync --extra nn
+```
+
+On an NVIDIA GPU computer, the preceding command may install the CPU-only
+PyTorch package. Replace it with the CUDA 12.8 packages:
+
+```bat
+uv pip install --python .venv\Scripts\python.exe --reinstall-package torch --reinstall-package torchvision torch==2.9.1 torchvision==0.24.1 --torch-backend cu128
+```
+
+Activate the rebuilt environment:
+
+```bat
+call .venv\Scripts\activate.bat
+```
+
+Verify that PyTorch can use the GPU:
+
+```bat
+python -c "import torch; print('PyTorch:', torch.__version__); print('CUDA:', torch.version.cuda); print('GPU available:', torch.cuda.is_available()); print('GPU:', torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'None')"
+```
+
+For the CUDA 12.8 installation, the output should include:
+
+```text
+PyTorch: 2.9.1+cu128
+CUDA: 12.8
+GPU available: True
+GPU: NVIDIA GeForce RTX 4080
+```
+
+The GPU name will be different on computers with a different NVIDIA card. If
+`GPU available` is `True`, start SLEAP:
+
+```bat
+sleap
+```
+
+Keep SLEAP completely closed while rebuilding the environment. If a later
+`uv sync` changes PyTorch back to a version ending in `+cpu`, close SLEAP and
+repeat the `uv pip install` command above.
 
 ### Recreate the environment from scratch
 
