@@ -723,6 +723,20 @@ class CommandContext:
             SetInstancePointVisibility, instance=instance, node=node, visible=visible
         )
 
+    def setInstancePointsVisibility(
+        self,
+        instance_nodes: List[Tuple[Instance, Node]],
+        visible: bool,
+        mark_complete: bool = False,
+    ):
+        """Set visibility for multiple instance nodes as one edit."""
+        self.execute(
+            SetInstancePointsVisibility,
+            instance_nodes=instance_nodes,
+            visible=visible,
+            mark_complete=mark_complete,
+        )
+
     def addUserInstancesFromPredictions(self):
         """Create user instance from a predicted instance."""
         self.execute(AddUserInstancesFromPredictions)
@@ -5463,6 +5477,25 @@ class SetInstancePointVisibility(EditCommand):
         node_name = node if isinstance(node, str) else node.name
         if node_name in instance.skeleton.node_names:
             instance[node_name]["visible"] = visible
+
+
+class SetInstancePointsVisibility(EditCommand):
+    """Set visibility for multiple nodes as one project edit."""
+
+    topics = []
+
+    @classmethod
+    def do_action(cls, context: "CommandContext", params: dict):
+        visible = params["visible"]
+        mark_complete = params.get("mark_complete", False)
+
+        for instance, node in params["instance_nodes"]:
+            node_name = node if isinstance(node, str) else node.name
+            if node_name not in instance.skeleton.node_names:
+                continue
+            instance[node_name]["visible"] = visible
+            if mark_complete:
+                instance[node_name]["complete"] = True
 
 
 class AddMissingInstanceNodes(EditCommand):

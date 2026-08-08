@@ -97,6 +97,10 @@ class UserControlsDialog(QtWidgets.QDialog):
         ("Mouse wheel during Alt node drag", "Rotate the instance around that node."),
         ("Ctrl + drag empty frame", "Rubber-band select multiple nodes."),
         ("Drag selected node group", "Move the selected nodes together."),
+        (
+            "Right click selected node group",
+            "Choose Mark Selected Nodes Missing for all selected user nodes.",
+        ),
         ("Alt + drag empty frame", "Draw a zoom box and zoom to that rectangle."),
         ("Middle drag", "Pan the video view."),
         ("Left double-click background", "Reset zoom and pan to the full frame."),

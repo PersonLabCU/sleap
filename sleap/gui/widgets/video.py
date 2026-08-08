@@ -907,6 +907,7 @@ class QtVideoPlayer(QWidget):
         target_video: Optional[Video] = None,
         target_frame_idx: Optional[int] = None,
         target_instance: Optional["QtInstance"] = None,
+        target_view: Optional["GraphicsView"] = None,
     ) -> QtWidgets.QMenu:
         """Create the context menu for the viewer.
 
@@ -922,9 +923,23 @@ class QtVideoPlayer(QWidget):
         """
 
         self.context_menu = QtWidgets.QMenu()
+        self._menu_actions = dict()
+
+        if target_view is not None and target_view.group_selection_contains(scene_pos):
+            self._menu_actions["Mark Selected Nodes Missing"] = (
+                self.context_menu.addAction(
+                    "Mark Selected Nodes Missing",
+                    lambda checked=False, view=target_view: (
+                        self._run_after_context_menu_closes(
+                            view.mark_selected_nodes_missing
+                        )
+                    ),
+                )
+            )
+            self.context_menu.addSeparator()
+
         self.context_menu.addAction("Add Instance:").setEnabled(False)
 
-        self._menu_actions = dict()
         params_by_action_name = {
             "Default": {
                 "init_method": "best",
@@ -1057,6 +1072,7 @@ class QtVideoPlayer(QWidget):
             target_video=target_video,
             target_frame_idx=target_frame_idx,
             target_instance=target_instance,
+            target_view=target_view,
         )
         menu.exec_(self.mapToGlobal(where))
 
@@ -1073,6 +1089,7 @@ class QtVideoPlayer(QWidget):
             target_video=self._video_for_view(view),
             target_frame_idx=self._frame_idx_for_view(view),
             target_instance=target_instance,
+            target_view=view,
         )
         menu.exec_(view.mapToGlobal(where))
 
@@ -2221,6 +2238,53 @@ class GraphicsView(QGraphicsView):
         self._group_rect_item = self.scene.addRect(tight_rect, _pen, QBrush(Qt.NoBrush))
         self._group_rect_item.setZValue(50)
 
+    def group_selection_contains(self, scene_pos: "QPointF") -> bool:
+        """Return whether a point is inside the active node-group selection."""
+        if not self._group_selected_nodes or self._group_rect_item is None:
+            return False
+        try:
+            return self._group_rect_item.rect().contains(scene_pos)
+        except RuntimeError:
+            self._clear_group_selection()
+            return False
+
+    def mark_selected_nodes_missing(self) -> int:
+        """Mark editable nodes in the active group selection as missing."""
+        editable_nodes = []
+        instance_nodes = []
+
+        for node in self._group_selected_nodes:
+            try:
+                parent = node.parentItem()
+            except RuntimeError:
+                continue
+            if not isinstance(parent, QtInstance) or parent.predicted:
+                continue
+            editable_nodes.append(node)
+            instance_nodes.append((parent.instance, node.node))
+
+        if not instance_nodes:
+            return 0
+
+        context = self.player.context if self.player is not None else None
+        if context is not None:
+            context.setInstancePointsVisibility(
+                instance_nodes, visible=False, mark_complete=True
+            )
+        else:
+            for instance, node in instance_nodes:
+                instance[node.name]["visible"] = False
+                instance[node.name]["complete"] = True
+
+        for node in editable_nodes:
+            node.updatePoint(user_change=False)
+
+        count = len(editable_nodes)
+        self._clear_group_selection()
+        if self.player is not None:
+            self.player.update_plot()
+        return count
+
     def _clear_group_selection(self):
         """Remove the group selection overlay and reset all group selection state."""
         self._group_selected_nodes = []
@@ -2955,6 +3019,12 @@ class QtNode(QGraphicsEllipseItem):
                 True  # point['complete'] = complete, FIXME: move to command
             )
         elif event.button() == Qt.RightButton:
+            if self in parent.display_view._group_selected_nodes:
+                # Let the view open the selected-node-group context menu instead of
+                # toggling only the node under the cursor.
+                event.ignore()
+                return
+
             # Select instance this nodes belong to.
             parent.player.state["instance"] = parent.instance
 

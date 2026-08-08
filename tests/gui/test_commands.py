@@ -74,6 +74,23 @@ def test_delete_user_dialog(centered_pair_predictions):
     assert len(context.state["labeled_frame"].user_instances) == 2
 
 
+def test_set_multiple_instance_points_visibility(centered_pair_labels):
+    labels = centered_pair_labels
+    instance = labels.labeled_frames[0].user_instances[0]
+    nodes = instance.skeleton.nodes[:2]
+    context = CommandContext.from_labels(labels)
+
+    context.setInstancePointsVisibility(
+        [(instance, node) for node in nodes],
+        visible=False,
+        mark_complete=True,
+    )
+
+    assert all(not instance[node.name]["visible"] for node in nodes)
+    assert all(instance[node.name]["complete"] for node in nodes)
+    assert context._change_stack == ["SetInstancePointsVisibility"]
+
+
 def test_goto_video_frame_instance_selects_instance(centered_pair_labels):
     """`gotoVideoAndFrameAndInstance` makes the navigated user instance the
     app-selected instance (``state["instance"]``), so selection-relative views --

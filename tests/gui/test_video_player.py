@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import sleap_io as sio
 
 from sleap.gui.state import GuiState
+from sleap.gui.commands import CommandContext
 from sleap.gui.reach_detection import ReachOutcome, ReachSegment
 from sleap.gui.widgets.video import (
     GraphicsView,
@@ -85,6 +86,47 @@ def test_context_menu_add_instance_actions_ignore_checked_arg():
         assert "location" not in calls[3]
         assert calls[4]["location"] == scene_pos
         assert all(call["target_frame_idx"] == 7 for call in calls)
+    finally:
+        vp.cleanup()
+
+
+def test_context_menu_marks_selected_nodes_missing(centered_pair_labels):
+    labels = centered_pair_labels
+    lf = labels.labeled_frames[0]
+    instance = lf.user_instances[0]
+    context = CommandContext.from_labels(labels)
+    context.state["labeled_frame"] = lf
+    vp = QtVideoPlayer(
+        labels.videos[0],
+        state=context.state,
+        context=context,
+    )
+
+    try:
+        vp.addInstance(instance=instance, frame=lf)
+        qt_instance = vp.view.instances[0]
+        selected_nodes = list(qt_instance.nodes.values())[:2]
+        unselected_node = list(qt_instance.nodes.values())[2]
+        selection_rect = QtCore.QRectF(
+            min(node.scenePos().x() for node in selected_nodes) - 5,
+            min(node.scenePos().y() for node in selected_nodes) - 5,
+            abs(selected_nodes[1].scenePos().x() - selected_nodes[0].scenePos().x())
+            + 10,
+            abs(selected_nodes[1].scenePos().y() - selected_nodes[0].scenePos().y())
+            + 10,
+        )
+        vp.view._group_selected_nodes = selected_nodes
+        vp.view._group_rect_item = vp.view.scene.addRect(selection_rect)
+
+        vp.create_contextual_menu(
+            selection_rect.center(),
+            target_view=vp.view,
+        )
+        vp._menu_actions["Mark Selected Nodes Missing"].trigger()
+
+        assert all(not node.point["visible"] for node in selected_nodes)
+        assert unselected_node.point["visible"]
+        assert vp.view._group_selected_nodes == []
     finally:
         vp.cleanup()
 
