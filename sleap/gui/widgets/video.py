@@ -938,6 +938,39 @@ class QtVideoPlayer(QWidget):
             )
             self.context_menu.addSeparator()
 
+        selected_instance = (
+            target_view.getSelectionInstance() if target_view is not None else None
+        )
+        if self.context is not None and type(selected_instance) is Instance:
+            missing_nodes = [
+                node
+                for node in selected_instance.skeleton.nodes
+                if not selected_instance[node.name]["visible"]
+            ]
+            if missing_nodes:
+                place_menu = self.context_menu.addMenu("Place Missing Node")
+                self._menu_actions["Place Missing Node"] = place_menu.menuAction()
+                location = (scene_pos.x(), scene_pos.y())
+                for node in missing_nodes:
+                    self._menu_actions[f"Place Missing Node:{node.name}"] = (
+                        place_menu.addAction(
+                            node.name,
+                            lambda checked=False,
+                            instance=selected_instance,
+                            node=node,
+                            location=location: self._run_after_context_menu_closes(
+                                lambda instance=instance,
+                                node=node,
+                                location=location: self.context.placeInstancePoint(
+                                    instance=instance,
+                                    node=node,
+                                    location=location,
+                                )
+                            ),
+                        )
+                    )
+                self.context_menu.addSeparator()
+
         self.context_menu.addAction("Add Instance:").setEnabled(False)
 
         params_by_action_name = {

@@ -131,6 +131,51 @@ def test_context_menu_marks_selected_nodes_missing(centered_pair_labels):
         vp.cleanup()
 
 
+def test_context_menu_places_missing_node(centered_pair_labels):
+    labels = centered_pair_labels
+    lf = labels.labeled_frames[0]
+    instance = lf.user_instances[0]
+    missing_nodes = instance.skeleton.nodes[:2]
+    visible_node = instance.skeleton.nodes[2]
+    for node in missing_nodes:
+        instance[node.name]["visible"] = False
+        instance[node.name]["complete"] = False
+    instance[visible_node.name]["visible"] = True
+
+    context = CommandContext.from_labels(labels)
+    context.state["labeled_frame"] = lf
+    context.state["instance"] = instance
+    vp = QtVideoPlayer(
+        labels.videos[0],
+        state=context.state,
+        context=context,
+    )
+
+    try:
+        vp.addInstance(instance=instance, frame=lf)
+        vp.view.selectInstance(instance)
+        scene_pos = QtCore.QPointF(12, 34)
+
+        vp.create_contextual_menu(scene_pos, target_view=vp.view)
+
+        assert all(
+            f"Place Missing Node:{node.name}" in vp._menu_actions
+            for node in missing_nodes
+        )
+        assert f"Place Missing Node:{visible_node.name}" not in vp._menu_actions
+
+        vp._menu_actions[f"Place Missing Node:{missing_nodes[0].name}"].trigger()
+
+        np.testing.assert_array_equal(
+            instance[missing_nodes[0].name]["xy"], [scene_pos.x(), scene_pos.y()]
+        )
+        assert instance[missing_nodes[0].name]["visible"]
+        assert instance[missing_nodes[0].name]["complete"]
+        assert not instance[missing_nodes[1].name]["visible"]
+    finally:
+        vp.cleanup()
+
+
 def test_gui_video(qtbot):
     vp = QtVideoPlayer()
     vp.show()

@@ -717,6 +717,17 @@ class CommandContext:
             nodes_locations=nodes_locations,
         )
 
+    def placeInstancePoint(
+        self, instance: Instance, node: Node, location: Tuple[float, float]
+    ):
+        """Place a missing instance point and mark it reviewed."""
+        self.execute(
+            PlaceInstancePoint,
+            instance=instance,
+            node=node,
+            location=location,
+        )
+
     def setInstancePointVisibility(self, instance: Instance, node: Node, visible: bool):
         """Toggles visibility set for a node for an instance."""
         self.execute(
@@ -5451,6 +5462,30 @@ class SetInstancePointLocations(EditCommand):
                 and np.isfinite(y)
             ):
                 instance[node_name]["xy"] = np.array([x, y])
+
+
+class PlaceInstancePoint(EditCommand):
+    """Place one instance point, make it visible, and mark it complete."""
+
+    topics = [UpdateTopic.frame]
+
+    @classmethod
+    def do_action(cls, context: "CommandContext", params: dict):
+        instance = params["instance"]
+        node = params["node"]
+        x, y = params["location"]
+
+        node_name = node if isinstance(node, str) else node.name
+        if (
+            node_name not in instance.skeleton.node_names
+            or not np.isfinite(x)
+            or not np.isfinite(y)
+        ):
+            return
+
+        instance[node_name]["xy"] = np.array([x, y])
+        instance[node_name]["visible"] = True
+        instance[node_name]["complete"] = True
 
 
 class SetInstancePointVisibility(EditCommand):

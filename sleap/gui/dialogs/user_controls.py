@@ -113,7 +113,11 @@ class UserControlsDialog(QtWidgets.QDialog):
             "Left double-click user instance",
             "Add any missing skeleton nodes to that instance.",
         ),
-        ("Right click frame", "Open the viewer context menu for adding instances."),
+        (
+            "Right click frame",
+            "Open the viewer context menu for placing the selected user instance's "
+            "missing nodes or adding instances.",
+        ),
         (
             "Right click prediction",
             "Open the viewer context menu with a Delete Prediction option.",

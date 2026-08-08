@@ -91,6 +91,22 @@ def test_set_multiple_instance_points_visibility(centered_pair_labels):
     assert context._change_stack == ["SetInstancePointsVisibility"]
 
 
+def test_place_instance_point(centered_pair_labels):
+    labels = centered_pair_labels
+    instance = labels.labeled_frames[0].user_instances[0]
+    node = instance.skeleton.nodes[0]
+    context = CommandContext.from_labels(labels)
+    instance[node.name]["visible"] = False
+    instance[node.name]["complete"] = False
+
+    context.placeInstancePoint(instance, node, (12.5, 34.5))
+
+    np.testing.assert_array_equal(instance[node.name]["xy"], [12.5, 34.5])
+    assert instance[node.name]["visible"]
+    assert instance[node.name]["complete"]
+    assert context._change_stack == ["PlaceInstancePoint"]
+
+
 def test_goto_video_frame_instance_selects_instance(centered_pair_labels):
     """`gotoVideoAndFrameAndInstance` makes the navigated user instance the
     app-selected instance (``state["instance"]``), so selection-relative views --
