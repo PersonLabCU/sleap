@@ -144,7 +144,7 @@ def test_context_menu_places_missing_node(centered_pair_labels):
 
     context = CommandContext.from_labels(labels)
     context.state["labeled_frame"] = lf
-    context.state["instance"] = instance
+    context.state["instance"] = None
     vp = QtVideoPlayer(
         labels.videos[0],
         state=context.state,
@@ -153,7 +153,6 @@ def test_context_menu_places_missing_node(centered_pair_labels):
 
     try:
         vp.addInstance(instance=instance, frame=lf)
-        vp.view.selectInstance(instance)
         scene_pos = QtCore.QPointF(12, 34)
 
         vp.create_contextual_menu(scene_pos, target_view=vp.view)

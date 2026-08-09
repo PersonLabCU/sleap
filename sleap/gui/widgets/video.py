@@ -938,9 +938,7 @@ class QtVideoPlayer(QWidget):
             )
             self.context_menu.addSeparator()
 
-        selected_instance = (
-            target_view.getSelectionInstance() if target_view is not None else None
-        )
+        selected_instance = self._editable_instance_for_context_menu(target_view)
         if self.context is not None and type(selected_instance) is Instance:
             missing_nodes = [
                 node
@@ -1078,6 +1076,32 @@ class QtVideoPlayer(QWidget):
                         )
 
         return self.context_menu
+
+    def _editable_instance_for_context_menu(
+        self, target_view: Optional["GraphicsView"]
+    ) -> Optional[Instance]:
+        """Return the editable instance targeted in a viewer pane."""
+        if target_view is None:
+            return None
+
+        selected_instance = target_view.getSelectionInstance()
+        if selected_instance is not None:
+            return selected_instance
+
+        state_instance = self.state["instance"]
+        for qt_instance in target_view.all_instances:
+            if qt_instance.instance is state_instance:
+                return state_instance
+
+        editable_instances = [
+            qt_instance.instance
+            for qt_instance in target_view.instances
+            if type(qt_instance.instance) is Instance
+        ]
+        if len(editable_instances) == 1:
+            return editable_instances[0]
+
+        return None
 
     def show_contextual_menu(self, where: QtCore.QPoint):
         """Show the context menu at the given position in the viewer.
