@@ -34,3 +34,15 @@ def test_find_session_dirs_nested_layout(tmp_path):
         (session_a, [session_a / "camA.mp4"]),
         (session_b, [session_b / "camB.avi"]),
     ]
+
+
+def test_video_name_has_suffix_ignores_extension_and_case():
+    assert BatchAnalysisDock.video_name_has_suffix(
+        "session_frontCam-0000_SYNCED.mp4", "_synced"
+    )
+    assert not BatchAnalysisDock.video_name_has_suffix(
+        "session_frontCam-0000.mp4", "_synced"
+    )
+    assert not BatchAnalysisDock.video_name_has_suffix(
+        "session_frontCam-0000_synced.mp4", ""
+    )

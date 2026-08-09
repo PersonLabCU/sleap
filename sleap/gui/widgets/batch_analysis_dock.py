@@ -20,13 +20,13 @@ from qtpy.QtWidgets import (
     QLabel,
     QLayout,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QTreeWidget,
+    QTreeWidgetItem,
     QVBoxLayout,
     QWidget,
 )
@@ -60,6 +60,7 @@ class BatchAnalysisWorker(QtCore.QThread):
         model_paths: Sequence[str],
         calibration_path: str,
         parent_dir: str,
+        sessions: Sequence[Tuple[Path, Sequence[Path]]],
         batch_size: int,
         max_instances: int,
         export_analysis_h5: bool = False,
@@ -74,6 +75,10 @@ class BatchAnalysisWorker(QtCore.QThread):
         self._model_paths = list(model_paths)
         self._calibration_path = calibration_path
         self._parent_dir = parent_dir
+        self._sessions = [
+            (Path(session_dir), [Path(video_path) for video_path in video_paths])
+            for session_dir, video_paths in sessions
+        ]
         self._batch_size = batch_size
         self._max_instances = max_instances
         self._export_analysis_h5 = export_analysis_h5
@@ -104,7 +109,7 @@ class BatchAnalysisWorker(QtCore.QThread):
             "failed_sessions": [],
         }
         try:
-            sessions = BatchAnalysisDock.find_session_dirs(self._parent_dir)
+            sessions = self._sessions
             if not sessions:
                 raise ValueError("No session folders with supported videos were found.")
 
@@ -1034,10 +1039,55 @@ class BatchAnalysisDock(DockWidget):
         layout = QVBoxLayout()
         layout.setSpacing(4)
 
-        self._session_list = QListWidget()
-        self._session_list.setSelectionMode(QAbstractItemView.NoSelection)
+        suffix_row = QHBoxLayout()
+        suffix_row.addWidget(QLabel("Suffix:"))
+        self._video_suffix_edit = QLineEdit()
+        self._video_suffix_edit.setPlaceholderText("Video name suffix, e.g. _synced")
+        self._video_suffix_edit.setToolTip(
+            "Match the end of each video filename before its extension. Matching "
+            "is case-insensitive."
+        )
+        keep_suffix_btn = QPushButton("Keep Matching")
+        keep_suffix_btn.setToolTip(
+            "Include videos ending with this suffix and exclude all other videos."
+        )
+        keep_suffix_btn.clicked.connect(
+            lambda: self._apply_video_suffix(keep_matches=True)
+        )
+        exclude_suffix_btn = QPushButton("Exclude Matching")
+        exclude_suffix_btn.setToolTip(
+            "Exclude videos ending with this suffix without changing other videos."
+        )
+        exclude_suffix_btn.clicked.connect(
+            lambda: self._apply_video_suffix(keep_matches=False)
+        )
+        self._video_suffix_edit.returnPressed.connect(
+            lambda: self._apply_video_suffix(keep_matches=True)
+        )
+        suffix_row.addWidget(self._video_suffix_edit)
+        suffix_row.addWidget(keep_suffix_btn)
+        suffix_row.addWidget(exclude_suffix_btn)
+        layout.addLayout(suffix_row)
+
+        self._session_list = QTreeWidget()
+        self._session_list.setHeaderHidden(True)
+        self._session_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self._session_list.setAlternatingRowColors(True)
+        self._session_list.itemChanged.connect(self._on_video_selection_changed)
         layout.addWidget(self._session_list)
+
+        selection_row = QHBoxLayout()
+        include_all_btn = QPushButton("Include All Views")
+        include_all_btn.clicked.connect(lambda: self._set_all_videos_checked(True))
+        exclude_selected_btn = QPushButton("Exclude Selected Views")
+        exclude_selected_btn.setToolTip(
+            "Uncheck the selected video rows. Selecting a session excludes all of "
+            "its video views."
+        )
+        exclude_selected_btn.clicked.connect(self._exclude_selected_videos)
+        selection_row.addWidget(include_all_btn)
+        selection_row.addWidget(exclude_selected_btn)
+        layout.addLayout(selection_row)
 
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self._refresh_sessions)
@@ -1087,7 +1137,9 @@ class BatchAnalysisDock(DockWidget):
     def _refresh_sessions(self) -> None:
         if not hasattr(self, "_session_list"):
             return
+        self._session_list.blockSignals(True)
         self._session_list.clear()
+        self._session_list.blockSignals(False)
         parent_dir = self._parent_path_edit.text().strip()
         if not parent_dir:
             self._refresh_reach_camera_options([])
@@ -1101,20 +1153,105 @@ class BatchAnalysisDock(DockWidget):
             return
 
         sessions = self.find_session_dirs(parent)
-        self._refresh_reach_camera_options(sessions)
+        self._session_list.blockSignals(True)
         for session_dir, videos in sessions:
             rel = self._relative_display(session_dir, parent)
-            item = QListWidgetItem(f"{rel}  ({len(videos)} video(s))")
-            item.setToolTip("\n".join(str(path) for path in videos))
-            self._session_list.addItem(item)
+            session_item = QTreeWidgetItem(
+                self._session_list, [f"{rel}  ({len(videos)} video(s))"]
+            )
+            session_item.setData(0, Qt.UserRole, str(session_dir))
+            session_item.setToolTip(0, str(session_dir))
+            session_item.setExpanded(True)
+            for video_path in videos:
+                video_item = QTreeWidgetItem(session_item, [video_path.name])
+                video_item.setFlags(video_item.flags() | Qt.ItemIsUserCheckable)
+                video_item.setCheckState(0, Qt.Checked)
+                video_item.setData(0, Qt.UserRole, str(video_path))
+                video_item.setToolTip(0, str(video_path))
+        self._session_list.blockSignals(False)
 
         if sessions:
-            n_videos = sum(len(videos) for _, videos in sessions)
-            self._set_status(
-                f"Found {len(sessions)} session folder(s), {n_videos} video(s)."
-            )
+            self._on_video_selection_changed()
         else:
+            self._refresh_reach_camera_options([])
             self._set_status("No session folders with supported videos found.")
+
+    def _selected_sessions(self) -> List[Tuple[Path, List[Path]]]:
+        """Return session folders and video views currently checked in the tree."""
+        if not hasattr(self, "_session_list"):
+            return []
+
+        sessions = []
+        for session_idx in range(self._session_list.topLevelItemCount()):
+            session_item = self._session_list.topLevelItem(session_idx)
+            videos = []
+            for video_idx in range(session_item.childCount()):
+                video_item = session_item.child(video_idx)
+                if video_item.checkState(0) == Qt.Checked:
+                    videos.append(Path(video_item.data(0, Qt.UserRole)))
+            if videos:
+                sessions.append(
+                    (Path(session_item.data(0, Qt.UserRole)), videos)
+                )
+        return sessions
+
+    def _on_video_selection_changed(self, *_) -> None:
+        sessions = self._selected_sessions()
+        self._refresh_reach_camera_options(sessions)
+        selected_count = sum(len(videos) for _, videos in sessions)
+        detected_count = sum(
+            self._session_list.topLevelItem(idx).childCount()
+            for idx in range(self._session_list.topLevelItemCount())
+        )
+        self._set_status(
+            f"Selected {selected_count} of {detected_count} video(s) across "
+            f"{len(sessions)} session folder(s)."
+        )
+        self._update_run_btn()
+
+    def _set_all_videos_checked(self, checked: bool) -> None:
+        state = Qt.Checked if checked else Qt.Unchecked
+        self._session_list.blockSignals(True)
+        for session_idx in range(self._session_list.topLevelItemCount()):
+            session_item = self._session_list.topLevelItem(session_idx)
+            for video_idx in range(session_item.childCount()):
+                session_item.child(video_idx).setCheckState(0, state)
+        self._session_list.blockSignals(False)
+        self._on_video_selection_changed()
+
+    def _exclude_selected_videos(self) -> None:
+        self._session_list.blockSignals(True)
+        for item in self._session_list.selectedItems():
+            if item.parent() is None:
+                for video_idx in range(item.childCount()):
+                    item.child(video_idx).setCheckState(0, Qt.Unchecked)
+            else:
+                item.setCheckState(0, Qt.Unchecked)
+        self._session_list.blockSignals(False)
+        self._on_video_selection_changed()
+
+    def _apply_video_suffix(self, *, keep_matches: bool) -> None:
+        suffix = self._video_suffix_edit.text().strip()
+        if not suffix:
+            self._set_status("Enter a video name suffix first.", error=True)
+            return
+
+        self._session_list.blockSignals(True)
+        for session_idx in range(self._session_list.topLevelItemCount()):
+            session_item = self._session_list.topLevelItem(session_idx)
+            for video_idx in range(session_item.childCount()):
+                video_item = session_item.child(video_idx)
+                matches = self.video_name_has_suffix(
+                    video_item.data(0, Qt.UserRole), suffix
+                )
+                if keep_matches:
+                    video_item.setCheckState(
+                        0, Qt.Checked if matches else Qt.Unchecked
+                    )
+                elif matches:
+                    video_item.setCheckState(0, Qt.Unchecked)
+        self._session_list.blockSignals(False)
+        self._on_video_selection_changed()
 
     def _refresh_reach_camera_options(
         self, sessions: Sequence[Tuple[Path, List[Path]]]
@@ -1154,7 +1291,8 @@ class BatchAnalysisDock(DockWidget):
             return
         has_model = bool(self._model_path_edit.text().strip())
         has_parent = Path(self._parent_path_edit.text().strip()).is_dir()
-        self._run_btn.setEnabled(has_model and has_parent)
+        has_videos = bool(self._selected_sessions())
+        self._run_btn.setEnabled(has_model and has_parent and has_videos)
 
     def _run_batch_analysis(self) -> None:
         model_paths = self._selected_model_paths()
@@ -1180,13 +1318,13 @@ class BatchAnalysisDock(DockWidget):
                     "Please select a valid calibration.toml file, or clear the field.",
                 )
                 return
-        sessions = self.find_session_dirs(parent_dir)
+        sessions = self._selected_sessions()
         if not sessions:
             QMessageBox.warning(
                 self,
-                "No Sessions Found",
-                "No session folders with supported videos were found under "
-                "the parent directory.",
+                "No Videos Selected",
+                "Please include at least one detected video before running batch "
+                "analysis.",
             )
             return
 
@@ -1259,6 +1397,7 @@ class BatchAnalysisDock(DockWidget):
             model_paths=model_paths,
             calibration_path=calibration_path,
             parent_dir=parent_dir,
+            sessions=sessions,
             batch_size=self._batch_spin.value(),
             max_instances=self._max_inst_spin.value(),
             export_analysis_h5=self._export_analysis_h5_check.isChecked(),
@@ -1349,7 +1488,7 @@ class BatchAnalysisDock(DockWidget):
                 f"Batch analysis failed: {result['error'] or 'canceled'}",
                 error=True,
             )
-        self._run_btn.setEnabled(True)
+        self._update_run_btn()
 
     @classmethod
     def find_session_dirs(cls, parent_dir: str | Path) -> List[Tuple[Path, List[Path]]]:
@@ -1379,6 +1518,14 @@ class BatchAnalysisDock(DockWidget):
                 continue
             videos.append(path)
         return videos
+
+    @staticmethod
+    def video_name_has_suffix(video_path: str | Path, suffix: str) -> bool:
+        """Return whether a video's stem ends with a suffix, ignoring case."""
+        suffix = str(suffix or "").strip()
+        if not suffix:
+            return False
+        return Path(video_path).stem.casefold().endswith(suffix.casefold())
 
     @staticmethod
     def _relative_display(path: Path, parent: Path) -> str:
