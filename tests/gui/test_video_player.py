@@ -586,6 +586,7 @@ def test_session_views_cycle_and_clamp(
     assert vp.primary_title.text() == "front"
     assert vp.secondary_title.text() == "side"
     assert vp._clamped_frame_idx(small_robot_3_frame_vid) == 2
+    assert not vp.main_view_button.isHidden()
 
     vp.set_hovered_session_view(vp.secondary_view)
     assert vp.cycle_hovered_session_view()
@@ -605,6 +606,18 @@ def test_session_views_cycle_and_clamp(
     assert vp.video is primary_video
     assert vp.secondary_video is small_robot_3_frame_vid
     assert vp.secondary_title.text() == "top"
+
+    vp._update_main_view_menu()
+    main_view_actions = {
+        action.text(): action for action in vp.main_view_menu.actions()
+    }
+    main_view_actions["top"].trigger()
+    assert state["video"] is small_robot_3_frame_vid
+    assert vp.video is small_robot_3_frame_vid
+    assert vp.primary_title.text() == "top"
+    assert vp.secondary_video is primary_video
+    assert vp.secondary_title.text() == "front"
+    assert main_view_actions["top"].isChecked()
 
 
 def test_getInstancesBoundingRect():

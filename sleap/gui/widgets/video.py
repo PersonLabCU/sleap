@@ -241,6 +241,7 @@ class QtVideoPlayer(QWidget):
         self.secondary_video = None
         self._session_videos = []
         self._hovered_session_view = None
+        self._requested_main_video = None
 
         self.seekbar = VideoSlider()
         self.seekbar.keyPress.connect(self.keyPressEvent)
@@ -259,11 +260,33 @@ class QtVideoPlayer(QWidget):
             )
             title.hide()
 
+        self.main_view_menu = QtWidgets.QMenu(self)
+        self.main_view_menu.aboutToShow.connect(self._update_main_view_menu)
+        self.main_view_button = QtWidgets.QToolButton()
+        self.main_view_button.setText("Main view")
+        self.main_view_button.setToolTip("Choose the camera shown in the left pane")
+        self.main_view_button.setPopupMode(QtWidgets.QToolButton.InstantPopup)
+        self.main_view_button.setMenu(self.main_view_menu)
+        self.main_view_button.setStyleSheet(
+            "QToolButton { color: #e5e7eb; background: #1f2937; "
+            "border: 1px solid #374151; padding: 2px 6px; }"
+        )
+        self.main_view_button.hide()
+
+        self.primary_header = QtWidgets.QWidget()
+        self.primary_header.setStyleSheet("background: #111827;")
+        primary_header_layout = QtWidgets.QHBoxLayout(self.primary_header)
+        primary_header_layout.setContentsMargins(0, 0, 4, 0)
+        primary_header_layout.setSpacing(4)
+        primary_header_layout.addWidget(self.primary_title, 1)
+        primary_header_layout.addWidget(self.main_view_button)
+        self.primary_header.hide()
+
         self.primary_view_widget = QtWidgets.QWidget()
         primary_layout = QtWidgets.QVBoxLayout()
         primary_layout.setContentsMargins(0, 0, 0, 0)
         primary_layout.setSpacing(0)
-        primary_layout.addWidget(self.primary_title)
+        primary_layout.addWidget(self.primary_header)
         primary_layout.addWidget(self.view)
         self.primary_view_widget.setLayout(primary_layout)
 
@@ -611,8 +634,41 @@ class QtVideoPlayer(QWidget):
         session = self._get_current_session()
         self.primary_title.setText(self._video_title(self.video, session))
         self.secondary_title.setText(self._video_title(self.secondary_video, session))
+        self.primary_header.setVisible(bool(self.primary_title.text()))
         self.primary_title.setVisible(bool(self.primary_title.text()))
         self.secondary_title.setVisible(bool(self.secondary_title.text()))
+        self.main_view_button.setVisible(len(self._session_videos) >= 2)
+
+    def _update_main_view_menu(self):
+        """Populate the left-pane camera chooser when its menu is opened."""
+        self.main_view_menu.clear()
+        session = self._get_current_session()
+        for video in self._session_videos:
+            action = self.main_view_menu.addAction(self._video_title(video, session))
+            is_main_video = video is self.video
+            action.setCheckable(True)
+            action.setChecked(is_main_video)
+            action.setEnabled(not is_main_video)
+            action.triggered.connect(
+                lambda checked=False, video=video: self.set_main_session_video(video)
+            )
+
+    def set_main_session_video(self, video: Video) -> bool:
+        """Set which camera is the main (left-hand) view for this session."""
+        session = self._get_current_session()
+        self._session_videos = (
+            list(getattr(session, "videos", []) or []) if session is not None else []
+        )
+        if video not in self._session_videos or video is self.video:
+            return False
+
+        previous_main = self.video
+        if video is self.secondary_video:
+            self.secondary_video = previous_main
+
+        self._requested_main_video = video
+        self.state["video"] = video
+        return True
 
     def _sync_session_views(self):
         """Choose and show the linked companion view for the current session."""
@@ -1195,7 +1251,13 @@ class QtVideoPlayer(QWidget):
         session_videos = (
             list(getattr(session, "videos", []) or []) if session is not None else []
         )
-        if len(session_videos) >= 2 and video is not session_videos[0]:
+        requested_as_main = video is self._requested_main_video
+        self._requested_main_video = None
+        if (
+            len(session_videos) >= 2
+            and video is not session_videos[0]
+            and not requested_as_main
+        ):
             self.secondary_video = video
             self.state["video"] = session_videos[0]
             return
@@ -1232,9 +1294,13 @@ class QtVideoPlayer(QWidget):
         self.video = None
         self.secondary_video = None
         self._session_videos = []
+        self._requested_main_video = None
         self.view.clear()
         self.secondary_view.clear()
         self.secondary_view_widget.hide()
+        self.main_view_menu.clear()
+        self.main_view_button.hide()
+        self.primary_header.hide()
         self.primary_title.clear()
         self.secondary_title.clear()
         self.primary_title.hide()
