@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 
 import numpy as np
-from qtpy import QtCore, QtWidgets
+from qtpy import QtCore, QtGui, QtWidgets
 
 import matplotlib
 import os
@@ -39,6 +39,204 @@ DEFAULT_3D_AXIS_LIMITS = (
 DEFAULT_3D_VIEW = {"elev": 70.0, "azim": 30.0, "roll": 120.0}
 
 
+class CameraTransformGizmo(QtWidgets.QWidget):
+    """Draggable XYZ camera translation and rotation overlay."""
+
+    cameraDelta = QtCore.Signal(str, str, float)
+    resetRequested = QtCore.Signal()
+
+    _COLORS = {
+        "x": QtGui.QColor("#ff3b30"),
+        "y": QtGui.QColor("#20c95a"),
+        "z": QtGui.QColor("#6f78ff"),
+    }
+    _AXIS_VECTORS = {
+        "x": QtCore.QPointF(46.0, 24.0),
+        "y": QtCore.QPointF(-42.0, 26.0),
+        "z": QtCore.QPointF(0.0, -52.0),
+    }
+    _RING_ANGLES = {"x": 62.0, "y": -62.0, "z": 0.0}
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
+        super().__init__(parent)
+        self.setFixedSize(150, 150)
+        self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+        self.setMouseTracking(True)
+        self.setToolTip(
+            "Drag an arrow to pan along X/Y/Z. Drag a ring to rotate the 3D "
+            "camera. Double-click to reset the view."
+        )
+        self._active_handle: Optional[Tuple[str, str]] = None
+        self._last_pos = QtCore.QPointF()
+
+    def paintEvent(self, event) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.Antialiasing)
+        center = self._center()
+
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(QtGui.QColor(15, 23, 42, 155))
+        painter.drawEllipse(self.rect().adjusted(4, 4, -4, -4))
+        painter.setBrush(QtCore.Qt.NoBrush)
+        painter.setPen(QtGui.QPen(QtGui.QColor(203, 213, 225, 150), 2.0))
+        painter.drawEllipse(self.rect().adjusted(7, 7, -7, -7))
+
+        for axis, path in self._ring_paths().items():
+            color = self._handle_color("rotate", axis)
+            painter.setPen(QtGui.QPen(color, 4.0))
+            painter.drawPath(path)
+
+        for axis, vector in self._AXIS_VECTORS.items():
+            color = self._handle_color("move", axis)
+            endpoint = center + vector
+            painter.setPen(
+                QtGui.QPen(
+                    color, 4.0, QtCore.Qt.SolidLine, QtCore.Qt.RoundCap
+                )
+            )
+            painter.drawLine(center, endpoint)
+            self._draw_arrowhead(painter, endpoint, vector, color)
+            self._draw_axis_label(painter, endpoint, vector, color, axis.upper())
+
+        painter.setPen(QtGui.QPen(QtGui.QColor(226, 232, 240), 1.0))
+        painter.setBrush(QtGui.QColor(30, 41, 59))
+        painter.drawEllipse(center, 5.0, 5.0)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() != QtCore.Qt.LeftButton:
+            event.ignore()
+            return
+        handle = self._handle_at(QtCore.QPointF(event.pos()))
+        if handle is None:
+            event.ignore()
+            return
+        self._active_handle = handle
+        self._last_pos = QtCore.QPointF(event.pos())
+        self.setCursor(QtCore.Qt.ClosedHandCursor)
+        self.update()
+        event.accept()
+
+    def mouseMoveEvent(self, event) -> None:
+        pos = QtCore.QPointF(event.pos())
+        if self._active_handle is None:
+            self.setCursor(
+                QtCore.Qt.OpenHandCursor
+                if self._handle_at(pos) is not None
+                else QtCore.Qt.ArrowCursor
+            )
+            return
+
+        operation, axis = self._active_handle
+        delta = pos - self._last_pos
+        self._last_pos = pos
+        if operation == "move":
+            vector = self._AXIS_VECTORS[axis]
+            length = max(1.0, np.hypot(vector.x(), vector.y()))
+            amount = (delta.x() * vector.x() + delta.y() * vector.y()) / length
+        else:
+            amount = delta.x() - delta.y()
+        if amount:
+            self.cameraDelta.emit(operation, axis, float(amount))
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._active_handle is None:
+            event.ignore()
+            return
+        self._active_handle = None
+        self.setCursor(QtCore.Qt.OpenHandCursor)
+        self.update()
+        event.accept()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        if event.button() == QtCore.Qt.LeftButton:
+            self.resetRequested.emit()
+            event.accept()
+        else:
+            event.ignore()
+
+    def wheelEvent(self, event) -> None:
+        event.ignore()
+
+    def _center(self) -> QtCore.QPointF:
+        return QtCore.QPointF(self.width() / 2.0, self.height() / 2.0)
+
+    def _ring_paths(self) -> dict:
+        paths = {}
+        center = self._center()
+        base = QtGui.QPainterPath()
+        base.addEllipse(QtCore.QRectF(-48.0, -18.0, 96.0, 36.0))
+        for axis, angle in self._RING_ANGLES.items():
+            transform = QtGui.QTransform()
+            transform.translate(center.x(), center.y())
+            transform.rotate(angle)
+            paths[axis] = transform.map(base)
+        return paths
+
+    def _handle_at(self, pos: QtCore.QPointF) -> Optional[Tuple[str, str]]:
+        center = self._center()
+        for axis, vector in self._AXIS_VECTORS.items():
+            if _distance_to_segment(pos, center, center + vector) <= 9.0:
+                return "move", axis
+
+        stroker = QtGui.QPainterPathStroker()
+        stroker.setWidth(12.0)
+        for axis, path in self._ring_paths().items():
+            if stroker.createStroke(path).contains(pos):
+                return "rotate", axis
+        return None
+
+    def _handle_color(self, operation: str, axis: str) -> QtGui.QColor:
+        color = QtGui.QColor(self._COLORS[axis])
+        if self._active_handle == (operation, axis):
+            return color.lighter(155)
+        return color
+
+    @staticmethod
+    def _draw_arrowhead(
+        painter: QtGui.QPainter,
+        endpoint: QtCore.QPointF,
+        vector: QtCore.QPointF,
+        color: QtGui.QColor,
+    ) -> None:
+        length = max(1.0, np.hypot(vector.x(), vector.y()))
+        unit = QtCore.QPointF(vector.x() / length, vector.y() / length)
+        perpendicular = QtCore.QPointF(-unit.y(), unit.x())
+        base = endpoint - unit * 12.0
+        polygon = QtGui.QPolygonF(
+            [
+                endpoint,
+                base + perpendicular * 6.0,
+                base - perpendicular * 6.0,
+            ]
+        )
+        painter.setPen(QtCore.Qt.NoPen)
+        painter.setBrush(color)
+        painter.drawPolygon(polygon)
+
+    @staticmethod
+    def _draw_axis_label(
+        painter: QtGui.QPainter,
+        endpoint: QtCore.QPointF,
+        vector: QtCore.QPointF,
+        color: QtGui.QColor,
+        label: str,
+    ) -> None:
+        length = max(1.0, np.hypot(vector.x(), vector.y()))
+        unit = QtCore.QPointF(vector.x() / length, vector.y() / length)
+        label_center = endpoint + unit * 10.0
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(11)
+        painter.setFont(font)
+        painter.setPen(color.lighter(135))
+        painter.drawText(
+            QtCore.QRectF(label_center.x() - 8.0, label_center.y() - 8.0, 16.0, 16.0),
+            QtCore.Qt.AlignCenter,
+            label,
+        )
+
+
 class Skeleton3DCanvas(Canvas):
     """Matplotlib canvas for plotting one frame of a 3D skeleton."""
 
@@ -46,6 +244,7 @@ class Skeleton3DCanvas(Canvas):
         self.fig = Figure(figsize=(width, height), dpi=dpi, constrained_layout=True)
         self.axes = None
         self.toolbar = None
+        self.camera_gizmo = None
         super().__init__(self.fig)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
@@ -53,6 +252,25 @@ class Skeleton3DCanvas(Canvas):
         self.setMinimumSize(520, 380)
         self.mpl_connect("scroll_event", self._on_scroll)
         self.updateGeometry()
+
+    def set_camera_gizmo(self, gizmo: CameraTransformGizmo) -> None:
+        """Attach and position a camera gizmo over the canvas."""
+        self.camera_gizmo = gizmo
+        self._position_camera_gizmo()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_camera_gizmo()
+
+    def _position_camera_gizmo(self) -> None:
+        if self.camera_gizmo is None:
+            return
+        margin = 12
+        self.camera_gizmo.move(
+            margin,
+            max(margin, self.height() - self.camera_gizmo.height() - margin),
+        )
+        self.camera_gizmo.raise_()
 
     def draw_frame(
         self,
@@ -307,6 +525,11 @@ class Skeleton3DWidget(QtWidgets.QWidget):
         layout.addLayout(controls)
 
         self.canvas = Skeleton3DCanvas()
+        self.camera_gizmo = CameraTransformGizmo(self.canvas)
+        self.camera_gizmo.cameraDelta.connect(self._apply_camera_gizmo_delta)
+        self.camera_gizmo.resetRequested.connect(self._reset_view)
+        self.camera_gizmo.hide()
+        self.canvas.set_camera_gizmo(self.camera_gizmo)
         if NavigationToolbar is not None:
             self.toolbar = NavigationToolbar(self.canvas, self)
             self.canvas.toolbar = self.toolbar
@@ -321,6 +544,11 @@ class Skeleton3DWidget(QtWidgets.QWidget):
         reset_view_button = QtWidgets.QPushButton("Reset View")
         reset_view_button.clicked.connect(self._reset_view)
         view_row.addWidget(reset_view_button)
+        gizmo_help = QtWidgets.QLabel(
+            "3D gizmo: drag arrows to pan; drag rings to rotate"
+        )
+        gizmo_help.setStyleSheet("color: #666;")
+        view_row.addWidget(gizmo_help)
         view_row.addStretch()
         layout.addLayout(view_row)
 
@@ -609,14 +837,59 @@ class Skeleton3DWidget(QtWidgets.QWidget):
             self.canvas._apply_axis_view(view)
             self.canvas.draw()
 
+    def _apply_camera_gizmo_delta(
+        self, operation: str, axis: str, amount: float
+    ) -> None:
+        """Apply one incremental gizmo drag to the current 3D camera view."""
+        axes = self.canvas.axes
+        if (
+            axes is None
+            or self.view_combo.currentText() != "3D"
+            or not hasattr(axes, "get_zlim")
+        ):
+            return
+
+        if operation == "move":
+            getters = {
+                "x": axes.get_xlim,
+                "y": axes.get_ylim,
+                "z": axes.get_zlim,
+            }
+            setters = {
+                "x": axes.set_xlim,
+                "y": axes.set_ylim,
+                "z": axes.set_zlim,
+            }
+            limits = getters[axis]()
+            shift = float(amount) * abs(float(limits[1]) - float(limits[0])) * 0.006
+            setters[axis](float(limits[0]) + shift, float(limits[1]) + shift)
+        elif operation == "rotate":
+            elev = float(getattr(axes, "elev", DEFAULT_3D_VIEW["elev"]))
+            azim = float(getattr(axes, "azim", DEFAULT_3D_VIEW["azim"]))
+            roll = float(getattr(axes, "roll", DEFAULT_3D_VIEW["roll"]))
+            angle = float(amount) * 0.6
+            if axis == "x":
+                elev += angle
+            elif axis == "y":
+                roll += angle
+            elif axis == "z":
+                azim += angle
+            _set_3d_view(axes, elev=elev, azim=azim, roll=roll)
+        else:
+            return
+
+        self.canvas.draw_idle()
+
     def update_plot(self, *args, preserve_view: bool = False) -> None:
         if self._plot_points is None:
+            self.camera_gizmo.hide()
             self.canvas.draw_empty()
             self.frame_label.setText("Frame 0 / 0")
             return
         frame_idx = int(self.frame_slider.value())
         total = self._plot_points.shape[0]
         self.frame_label.setText(f"Frame {frame_idx + 1} / {total}")
+        self.camera_gizmo.setVisible(self.view_combo.currentText() == "3D")
         self.canvas.draw_frame(
             self._plot_points,
             self._edges,
@@ -650,6 +923,27 @@ class Skeleton3DDialog(QtWidgets.QDialog):
 
     def set_frame(self, frame_idx: int) -> None:
         self.widget.set_frame(frame_idx)
+
+
+def _distance_to_segment(
+    point: QtCore.QPointF,
+    start: QtCore.QPointF,
+    end: QtCore.QPointF,
+) -> float:
+    """Return the 2D distance between a point and a finite line segment."""
+    segment_x = end.x() - start.x()
+    segment_y = end.y() - start.y()
+    length_squared = segment_x**2 + segment_y**2
+    if length_squared <= 0:
+        return float(np.hypot(point.x() - start.x(), point.y() - start.y()))
+    projection = (
+        (point.x() - start.x()) * segment_x
+        + (point.y() - start.y()) * segment_y
+    ) / length_squared
+    projection = float(np.clip(projection, 0.0, 1.0))
+    nearest_x = start.x() + projection * segment_x
+    nearest_y = start.y() + projection * segment_y
+    return float(np.hypot(point.x() - nearest_x, point.y() - nearest_y))
 
 
 def _rotation_to_x_axis(direction: np.ndarray) -> np.ndarray:
