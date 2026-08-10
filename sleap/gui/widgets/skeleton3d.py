@@ -40,22 +40,33 @@ DEFAULT_3D_VIEW = {"elev": 70.0, "azim": 30.0, "roll": 120.0}
 
 
 class CameraTransformGizmo(QtWidgets.QWidget):
-    """Draggable XYZ camera translation and rotation overlay."""
+    """Draggable XYZ pan and elevation/azimuth/roll camera overlay."""
 
     cameraDelta = QtCore.Signal(str, str, float)
     resetRequested = QtCore.Signal()
 
-    _COLORS = {
+    _MOVE_COLORS = {
         "x": QtGui.QColor("#ff3b30"),
         "y": QtGui.QColor("#20c95a"),
         "z": QtGui.QColor("#6f78ff"),
+    }
+    _ROTATION_COLORS = {
+        "elevation": QtGui.QColor("#ff3b30"),
+        "azimuth": QtGui.QColor("#20c95a"),
+        "roll": QtGui.QColor("#6f78ff"),
     }
     _AXIS_VECTORS = {
         "x": QtCore.QPointF(46.0, 24.0),
         "y": QtCore.QPointF(-42.0, 26.0),
         "z": QtCore.QPointF(0.0, -52.0),
     }
-    _RING_ANGLES = {"x": 62.0, "y": -62.0, "z": 0.0}
+    _RING_ANGLES = {"elevation": 62.0, "azimuth": -62.0, "roll": 0.0}
+    _RING_LABELS = {"elevation": "E", "azimuth": "A", "roll": "R"}
+    _RING_LABEL_POSITIONS = {
+        "elevation": QtCore.QPointF(126.0, 119.0),
+        "azimuth": QtCore.QPointF(24.0, 119.0),
+        "roll": QtCore.QPointF(126.0, 31.0),
+    }
 
     def __init__(self, parent: Optional[QtWidgets.QWidget] = None):
         super().__init__(parent)
@@ -63,11 +74,12 @@ class CameraTransformGizmo(QtWidgets.QWidget):
         self.setAttribute(QtCore.Qt.WA_TranslucentBackground)
         self.setMouseTracking(True)
         self.setToolTip(
-            "Drag an arrow to pan along X/Y/Z. Drag a ring to rotate the 3D "
-            "camera. Double-click to reset the view."
+            "Drag an X/Y/Z arrow to pan. Drag the E, A, or R ring to change "
+            "camera elevation, azimuth, or roll. Double-click to reset the view."
         )
         self._active_handle: Optional[Tuple[str, str]] = None
         self._last_pos = QtCore.QPointF()
+        self._last_ring_angle: Optional[float] = None
 
     def paintEvent(self, event) -> None:
         painter = QtGui.QPainter(self)
@@ -81,10 +93,11 @@ class CameraTransformGizmo(QtWidgets.QWidget):
         painter.setPen(QtGui.QPen(QtGui.QColor(203, 213, 225, 150), 2.0))
         painter.drawEllipse(self.rect().adjusted(7, 7, -7, -7))
 
-        for axis, path in self._ring_paths().items():
-            color = self._handle_color("rotate", axis)
+        for rotation, path in self._ring_paths().items():
+            color = self._handle_color("rotate", rotation)
             painter.setPen(QtGui.QPen(color, 4.0))
             painter.drawPath(path)
+            self._draw_ring_label(painter, rotation, color)
 
         for axis, vector in self._AXIS_VECTORS.items():
             color = self._handle_color("move", axis)
@@ -112,6 +125,9 @@ class CameraTransformGizmo(QtWidgets.QWidget):
             return
         self._active_handle = handle
         self._last_pos = QtCore.QPointF(event.pos())
+        self._last_ring_angle = (
+            self._ring_angle_at(self._last_pos) if handle[0] == "rotate" else None
+        )
         self.setCursor(QtCore.Qt.ClosedHandCursor)
         self.update()
         event.accept()
@@ -134,7 +150,12 @@ class CameraTransformGizmo(QtWidgets.QWidget):
             length = max(1.0, np.hypot(vector.x(), vector.y()))
             amount = (delta.x() * vector.x() + delta.y() * vector.y()) / length
         else:
-            amount = delta.x() - delta.y()
+            current_angle = self._ring_angle_at(pos)
+            previous_angle = self._last_ring_angle
+            self._last_ring_angle = current_angle
+            if previous_angle is None:
+                return
+            amount = (current_angle - previous_angle + 180.0) % 360.0 - 180.0
         if amount:
             self.cameraDelta.emit(operation, axis, float(amount))
         event.accept()
@@ -144,6 +165,7 @@ class CameraTransformGizmo(QtWidgets.QWidget):
             event.ignore()
             return
         self._active_handle = None
+        self._last_ring_angle = None
         self.setCursor(QtCore.Qt.OpenHandCursor)
         self.update()
         event.accept()
@@ -166,11 +188,11 @@ class CameraTransformGizmo(QtWidgets.QWidget):
         center = self._center()
         base = QtGui.QPainterPath()
         base.addEllipse(QtCore.QRectF(-48.0, -18.0, 96.0, 36.0))
-        for axis, angle in self._RING_ANGLES.items():
+        for rotation, angle in self._RING_ANGLES.items():
             transform = QtGui.QTransform()
             transform.translate(center.x(), center.y())
             transform.rotate(angle)
-            paths[axis] = transform.map(base)
+            paths[rotation] = transform.map(base)
         return paths
 
     def _handle_at(self, pos: QtCore.QPointF) -> Optional[Tuple[str, str]]:
@@ -181,16 +203,43 @@ class CameraTransformGizmo(QtWidgets.QWidget):
 
         stroker = QtGui.QPainterPathStroker()
         stroker.setWidth(12.0)
-        for axis, path in self._ring_paths().items():
+        for rotation, path in self._ring_paths().items():
             if stroker.createStroke(path).contains(pos):
-                return "rotate", axis
+                return "rotate", rotation
         return None
 
-    def _handle_color(self, operation: str, axis: str) -> QtGui.QColor:
-        color = QtGui.QColor(self._COLORS[axis])
-        if self._active_handle == (operation, axis):
+    def _handle_color(self, operation: str, handle: str) -> QtGui.QColor:
+        colors = self._MOVE_COLORS if operation == "move" else self._ROTATION_COLORS
+        color = QtGui.QColor(colors[handle])
+        if self._active_handle == (operation, handle):
             return color.lighter(155)
         return color
+
+    def _ring_angle_at(self, pos: QtCore.QPointF) -> float:
+        center = self._center()
+        return float(
+            np.degrees(np.arctan2(center.y() - pos.y(), pos.x() - center.x()))
+        )
+
+    def _draw_ring_label(
+        self, painter: QtGui.QPainter, rotation: str, color: QtGui.QColor
+    ) -> None:
+        label_center = self._RING_LABEL_POSITIONS[rotation]
+        font = painter.font()
+        font.setBold(True)
+        font.setPixelSize(11)
+        painter.setFont(font)
+        painter.setPen(color.lighter(135))
+        painter.drawText(
+            QtCore.QRectF(
+                label_center.x() - 8.0,
+                label_center.y() - 8.0,
+                16.0,
+                16.0,
+            ),
+            QtCore.Qt.AlignCenter,
+            self._RING_LABELS[rotation],
+        )
 
     @staticmethod
     def _draw_arrowhead(
@@ -530,6 +579,9 @@ class Skeleton3DWidget(QtWidgets.QWidget):
         self.camera_gizmo.resetRequested.connect(self._reset_view)
         self.camera_gizmo.hide()
         self.canvas.set_camera_gizmo(self.camera_gizmo)
+        self.canvas.mpl_connect(
+            "button_release_event", lambda _: self._update_camera_value_label()
+        )
         if NavigationToolbar is not None:
             self.toolbar = NavigationToolbar(self.canvas, self)
             self.canvas.toolbar = self.toolbar
@@ -544,13 +596,18 @@ class Skeleton3DWidget(QtWidgets.QWidget):
         reset_view_button = QtWidgets.QPushButton("Reset View")
         reset_view_button.clicked.connect(self._reset_view)
         view_row.addWidget(reset_view_button)
-        gizmo_help = QtWidgets.QLabel(
-            "3D gizmo: drag arrows to pan; drag rings to rotate"
-        )
-        gizmo_help.setStyleSheet("color: #666;")
-        view_row.addWidget(gizmo_help)
         view_row.addStretch()
         layout.addLayout(view_row)
+
+        camera_info_row = QtWidgets.QHBoxLayout()
+        gizmo_help = QtWidgets.QLabel("Gizmo: XYZ pan | E elevation | A azimuth | R roll")
+        gizmo_help.setStyleSheet("color: #666;")
+        camera_info_row.addWidget(gizmo_help)
+        camera_info_row.addStretch()
+        self.camera_values_label = QtWidgets.QLabel("")
+        self.camera_values_label.setStyleSheet("color: #666;")
+        camera_info_row.addWidget(self.camera_values_label)
+        layout.addLayout(camera_info_row)
 
         layout.addWidget(self.canvas, stretch=1)
 
@@ -836,6 +893,7 @@ class Skeleton3DWidget(QtWidgets.QWidget):
         if self.canvas.axes is not None:
             self.canvas._apply_axis_view(view)
             self.canvas.draw()
+            self._update_camera_value_label()
 
     def _apply_camera_gizmo_delta(
         self, operation: str, axis: str, amount: float
@@ -867,22 +925,42 @@ class Skeleton3DWidget(QtWidgets.QWidget):
             elev = float(getattr(axes, "elev", DEFAULT_3D_VIEW["elev"]))
             azim = float(getattr(axes, "azim", DEFAULT_3D_VIEW["azim"]))
             roll = float(getattr(axes, "roll", DEFAULT_3D_VIEW["roll"]))
-            angle = float(amount) * 0.6
-            if axis == "x":
+            angle = float(amount)
+            if axis == "elevation":
                 elev += angle
-            elif axis == "y":
-                roll += angle
-            elif axis == "z":
+            elif axis == "azimuth":
                 azim += angle
+            elif axis == "roll":
+                roll += angle
             _set_3d_view(axes, elev=elev, azim=azim, roll=roll)
         else:
             return
 
+        self._update_camera_value_label()
         self.canvas.draw_idle()
+
+    def _update_camera_value_label(self) -> None:
+        """Show the current Matplotlib elevation, azimuth, and roll values."""
+        axes = self.canvas.axes
+        is_3d = (
+            axes is not None
+            and self.view_combo.currentText() == "3D"
+            and hasattr(axes, "get_zlim")
+        )
+        self.camera_values_label.setVisible(is_3d)
+        if not is_3d:
+            self.camera_values_label.clear()
+            return
+        self.camera_values_label.setText(
+            f"Elev {float(axes.elev):.1f}°  |  "
+            f"Azim {float(axes.azim):.1f}°  |  "
+            f"Roll {float(getattr(axes, 'roll', 0.0)):.1f}°"
+        )
 
     def update_plot(self, *args, preserve_view: bool = False) -> None:
         if self._plot_points is None:
             self.camera_gizmo.hide()
+            self.camera_values_label.hide()
             self.canvas.draw_empty()
             self.frame_label.setText("Frame 0 / 0")
             return
@@ -898,6 +976,7 @@ class Skeleton3DWidget(QtWidgets.QWidget):
             axis_limits=self._axis_limits,
             preserve_view=preserve_view,
         )
+        self._update_camera_value_label()
 
 
 class Skeleton3DDialog(QtWidgets.QDialog):
