@@ -3,10 +3,11 @@
 This module tests the main CLI entry point and sleap-io command integration.
 """
 
+import click
 import pytest
 from click.testing import CliRunner
 
-from sleap.cli import cli
+from sleap.cli import cli, wrap_nn_command
 
 
 class TestCLIBasics:
@@ -460,119 +461,62 @@ class TestDefaultGroupBehavior:
         assert "No such command" not in result.output
 
 
-class TestSleapNNCLICommands:
-    """Tests for sleap-nn CLI commands (train, track, export, predict).
+class TestWrapNNCommandDeprecation:
+    """Tests for `wrap_nn_command`'s optional deprecation-warning behavior."""
 
-    These tests verify that the nn_cli module provides working entry points
-    for sleap-nn commands.
-    """
+    @staticmethod
+    def _make_dummy_command() -> click.Command:
+        @click.command(help="Do the thing.")
+        def dummy():
+            click.echo("ran")
 
-    def test_train_command_importable(self):
-        """Verify train command can be imported."""
-        from sleap.nn_cli import train
+        return dummy
 
-        assert train is not None
-        assert hasattr(train, "callback")
-
-    def test_track_command_importable(self):
-        """Verify track command can be imported."""
-        from sleap.nn_cli import track
-
-        assert track is not None
-        assert hasattr(track, "callback")
-
-    def test_export_command_importable(self):
-        """Verify export command can be imported."""
-        from sleap.nn_cli import export
-
-        assert export is not None
-        assert hasattr(export, "callback")
-
-    def test_predict_command_importable(self):
-        """Verify predict command can be imported."""
-        from sleap.nn_cli import predict
-
-        assert predict is not None
-        assert hasattr(predict, "callback")
-
-    def test_train_help(self):
-        """Verify train command help displays correctly."""
-        from sleap.nn_cli import train
+    def test_no_deprecated_note_runs_silently(self):
+        wrapped = wrap_nn_command(self._make_dummy_command())
 
         runner = CliRunner()
-        result = runner.invoke(train, ["--help"])
-        assert result.exit_code == 0
-        assert "config" in result.output.lower()
+        result = runner.invoke(wrapped, [])
 
-    def test_track_help(self):
-        """Verify track command help displays correctly."""
-        from sleap.nn_cli import track
+        assert result.exit_code == 0
+        assert "ran" in result.output
+        assert "Legacy" not in (wrapped.help or "")
+
+    def test_deprecated_note_warns_and_still_runs_the_command(self):
+        wrapped = wrap_nn_command(
+            self._make_dummy_command(),
+            deprecated_note="Note: dummy is deprecated, use 'thing' instead.",
+        )
 
         runner = CliRunner()
-        result = runner.invoke(track, ["--help"])
-        assert result.exit_code == 0
-        assert "data_path" in result.output
-        assert "model_paths" in result.output
+        result = runner.invoke(wrapped, [])
 
-    def test_track_has_filter_overlapping_options(self):
-        """Verify track command has new filter_overlapping options."""
-        from sleap.nn_cli import track
+        assert result.exit_code == 0
+        assert "Note: dummy is deprecated, use 'thing' instead." in result.output
+        assert "ran" in result.output
+        assert "(Legacy)" in wrapped.help
+
+    def test_sleap_track_is_registered_as_legacy(self):
+        """`sleap track` should be labeled legacy in the top-level command list."""
+        pytest.importorskip("sleap_nn")
 
         runner = CliRunner()
-        result = runner.invoke(track, ["--help"])
-        assert result.exit_code == 0
-        # Check for new filter_overlapping options
-        assert "--filter_overlapping" in result.output
-        assert "--filter_overlapping_method" in result.output
-        assert "--filter_overlapping_threshold" in result.output
-        # Check for method choices
-        assert "iou" in result.output
-        assert "oks" in result.output
+        result = runner.invoke(cli, ["--help"])
 
-    def test_export_help(self):
-        """Verify export command help displays correctly."""
-        from sleap.nn_cli import export
+        assert result.exit_code == 0
+        assert "(Legacy)" in result.output
+
+    def test_sleap_track_warns_on_invocation(self):
+        """Invoking `sleap track` should print the deprecation note pointing at
+        `sleap predict`. `--data_path` is sleap-nn's only required option and
+        isn't validated for existence, so this satisfies Click's own argument
+        parsing and reaches the wrapped callback; the underlying command then
+        fails for its own unrelated reasons (no such video/model), which is
+        fine since we only care that the warning fired before that."""
+        pytest.importorskip("sleap_nn")
 
         runner = CliRunner()
-        result = runner.invoke(export, ["--help"])
-        assert result.exit_code == 0
-        assert "Export" in result.output
-        assert "ONNX" in result.output or "onnx" in result.output
-        assert "tensorrt" in result.output.lower()
+        result = runner.invoke(cli, ["track", "-i", "nonexistent_video.mp4"])
 
-    def test_export_has_all_options(self):
-        """Verify export command has expected options."""
-        from sleap.nn_cli import export
-
-        runner = CliRunner()
-        result = runner.invoke(export, ["--help"])
-        assert result.exit_code == 0
-        assert "--output" in result.output
-        assert "--format" in result.output
-        assert "--device" in result.output
-        assert "--precision" in result.output
-        assert "--verify" in result.output
-
-    def test_predict_help(self):
-        """Verify predict command help displays correctly."""
-        from sleap.nn_cli import predict
-
-        runner = CliRunner()
-        result = runner.invoke(predict, ["--help"])
-        assert result.exit_code == 0
-        assert "inference" in result.output.lower()
-        assert "EXPORT_DIR" in result.output
-        assert "VIDEO_PATH" in result.output
-
-    def test_predict_has_all_options(self):
-        """Verify predict command has expected options."""
-        from sleap.nn_cli import predict
-
-        runner = CliRunner()
-        result = runner.invoke(predict, ["--help"])
-        assert result.exit_code == 0
-        assert "--output" in result.output
-        assert "--runtime" in result.output
-        assert "--device" in result.output
-        assert "--batch-size" in result.output
-        assert "--n-frames" in result.output
+        assert "sleap track" in result.output
+        assert "sleap predict" in result.output

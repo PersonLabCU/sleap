@@ -60,15 +60,16 @@ from sleap_io.io.cli import (
     export as sio_export,
 )
 
-# Import sleap-nn CLI commands for integration (optional, requires sleap-nn).
-# Keep core, export, and prediction availability independent so a missing
-# optional export command does not disable training and tracking.
+# Import sleap-nn CLI commands for integration (optional, requires sleap-nn)
+# Keep core and export availability independent so a missing optional export
+# command does not disable training, tracking, or prediction.
 try:
     from sleap_nn.cli import (
         train as nn_train,
         track as nn_track,
         eval as nn_eval,
         system as nn_system,
+        predict as nn_predict,
     )
 
     _SLEAP_NN_AVAILABLE = True
@@ -81,13 +82,6 @@ try:
     _SLEAP_NN_EXPORT_AVAILABLE = True
 except ImportError:
     _SLEAP_NN_EXPORT_AVAILABLE = False
-
-try:
-    from sleap_nn.export.cli import predict as nn_predict
-
-    _SLEAP_NN_PREDICT_AVAILABLE = True
-except ImportError:
-    _SLEAP_NN_PREDICT_AVAILABLE = False
 
 
 # =============================================================================
@@ -255,7 +249,9 @@ def wrap_sio_command(sio_cmd: click.Command) -> click.Command:
     return new_cmd
 
 
-def wrap_nn_command(nn_cmd: click.Command) -> click.Command:
+def wrap_nn_command(
+    nn_cmd: click.Command, deprecated_note: Optional[str] = None
+) -> click.Command:
     """Wrap a sleap-nn CLI command with SLEAP branding.
 
     This creates a new command that:
@@ -265,6 +261,8 @@ def wrap_nn_command(nn_cmd: click.Command) -> click.Command:
 
     Args:
         nn_cmd: A Click Command object from sleap-nn.
+        deprecated_note: If given, printed as a warning to stderr every time the
+            command runs, and prepended to its help text.
 
     Returns:
         A new Command object with SLEAP branding applied.
@@ -280,6 +278,16 @@ def wrap_nn_command(nn_cmd: click.Command) -> click.Command:
         new_cmd.help = new_cmd.help.replace("$ sleap-nn ", "$ sleap ")
         # Also replace any "sleap-nn" command references in the docs
         new_cmd.help = new_cmd.help.replace("[bold]sleap-nn[/]", "[bold]sleap[/]")
+
+    if deprecated_note is not None:
+        original_callback = new_cmd.callback
+
+        def _callback_with_deprecation_warning(*args: Any, **kwargs: Any) -> Any:
+            click.echo(click.style(deprecated_note, fg="yellow"), err=True)
+            return original_callback(*args, **kwargs)
+
+        new_cmd.callback = _callback_with_deprecation_warning
+        new_cmd.help = f"[dim](Legacy)[/] {new_cmd.help or ''}".strip()
 
     # Apply SLEAP's rich-click configuration
     # RichCommand stores config in _rich_config attribute
@@ -770,7 +778,7 @@ def doctor(output_json: bool, output_file: Optional[str], show_commit: bool) -> 
     # -------------------------------------------------------------------------
     with console.status(f"[{DIM}]Checking CLI binaries...[/]", spinner="dots"):
         binaries = []
-        bin_names = ["sleap", "sleap-nn", "sleap-nn-track", "sio"]
+        bin_names = ["sleap", "sleap-nn", "sio"]
         for bin_name in bin_names:
             bin_info = get_binary_info(bin_name)
             if bin_info:
@@ -912,7 +920,7 @@ def _doctor_json(show_commit: bool = False) -> None:
             packages.append(pkg_info)
 
     binaries = []
-    for bin_name in ["sleap", "sleap-nn", "sleap-nn-track", "sio"]:
+    for bin_name in ["sleap", "sleap-nn", "sio"]:
         bin_info = get_binary_info(bin_name)
         if bin_info:
             binaries.append(bin_info)
@@ -1224,23 +1232,30 @@ def _make_nn_stub(command_name: str) -> click.Command:
 # Add wrapped sleap-nn commands to the CLI group (if sleap-nn is installed)
 if _SLEAP_NN_AVAILABLE:
     cli.add_command(wrap_nn_command(nn_train), name="train")
-    cli.add_command(wrap_nn_command(nn_track), name="track")
+    cli.add_command(
+        wrap_nn_command(
+            nn_track,
+            deprecated_note=(
+                "Note: 'sleap track' runs sleap-nn's legacy inference pipeline and "
+                "is kept for backwards compatibility. Consider using 'sleap "
+                "predict' instead, which supports everything 'sleap track' does, "
+                "plus more."
+            ),
+        ),
+        name="track",
+    )
     cli.add_command(wrap_nn_command(nn_eval), name="eval")
+    cli.add_command(wrap_nn_command(nn_predict), name="predict")
     cli.add_command(wrap_nn_command(nn_system), name="system")
 else:
     # Register stub commands that show helpful error messages
-    for cmd_name in ["train", "track", "eval", "system"]:
+    for cmd_name in ["train", "track", "eval", "predict", "system"]:
         cli.add_command(_make_nn_stub(cmd_name), name=cmd_name)
 
 if _SLEAP_NN_EXPORT_AVAILABLE:
     cli.add_command(wrap_nn_command(nn_export), name="export-model")
 else:
     cli.add_command(_make_nn_stub("export-model"), name="export-model")
-
-if _SLEAP_NN_PREDICT_AVAILABLE:
-    cli.add_command(wrap_nn_command(nn_predict), name="predict")
-else:
-    cli.add_command(_make_nn_stub("predict"), name="predict")
 
 
 # =============================================================================
