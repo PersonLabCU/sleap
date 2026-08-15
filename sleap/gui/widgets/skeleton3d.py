@@ -30,6 +30,7 @@ from matplotlib.figure import Figure
 
 from sleap.gui.dialogs.filedialog import FileDialog
 from sleap.gui.reach_projection import load_points3d_h5
+from sleap.gui.session_events import get_session_for_video
 
 
 DEFAULT_3D_AXIS_LIMITS = (
@@ -535,6 +536,11 @@ class Skeleton3DWidget(QtWidgets.QWidget):
         self._saved_view = None
         self._syncing_slider = False
         self._setup_ui()
+        if self.main_window is not None:
+            self.main_window.state.connect("video", self.set_main_video)
+            self.set_main_video(
+                self.main_window.state.get("video", default=None)
+            )
         self.canvas.draw_empty()
 
     def _setup_ui(self) -> None:
@@ -705,6 +711,49 @@ class Skeleton3DWidget(QtWidgets.QWidget):
         self.frame_slider.setValue(frame_idx)
         self._syncing_slider = False
         self.update_plot(preserve_view=True)
+
+    def set_main_video(self, video) -> None:
+        """Select the 2D projection associated with the main session camera."""
+        view_mode = self._view_mode_for_video(video)
+        if view_mode is None or self.view_combo.currentText() == view_mode:
+            return
+        view_idx = self.view_combo.findText(view_mode)
+        if view_idx >= 0:
+            self.view_combo.setCurrentIndex(view_idx)
+
+    def _view_mode_for_video(self, video) -> Optional[str]:
+        """Map a session camera name, or its position, to an orthogonal view."""
+        if self.main_window is None or video is None:
+            return None
+
+        session = get_session_for_video(self.main_window.labels, video)
+        if session is None:
+            return None
+
+        videos = list(getattr(session, "videos", []) or [])
+        if video not in videos:
+            return None
+        video_idx = videos.index(video)
+
+        cameras = list(getattr(session, "cameras", []) or [])
+        if not cameras and getattr(session, "camera_group", None) is not None:
+            cameras = list(getattr(session.camera_group, "cameras", []) or [])
+
+        camera_name = ""
+        if video_idx < len(cameras):
+            camera_name = str(getattr(cameras[video_idx], "name", "") or "")
+        normalized_name = camera_name.casefold()
+        semantic_views = (
+            (("top", "overhead"), "XY"),
+            (("front", "frontal"), "XZ"),
+            (("side", "lateral"), "YZ"),
+        )
+        for names, view_mode in semantic_views:
+            if any(name in normalized_name for name in names):
+                return view_mode
+
+        ordered_views = ("XY", "XZ", "YZ")
+        return ordered_views[video_idx] if video_idx < len(ordered_views) else None
 
     def _populate_node_controls(self) -> None:
         self.origin_combo.blockSignals(True)
