@@ -1751,6 +1751,10 @@ class MainWindow(QMainWindow):
 
         # Show instances, etc, for this frame
         for overlay in self.overlays.values():
+            # ``changedPlot`` is emitted only after ``GraphicsView.clear()`` has
+            # deleted the previous scene items. Drop their Python references
+            # without passing the deleted objects back to Qt during redraw.
+            overlay.items = []
             try:
                 overlay.redraw(self.state["video"], frame_idx)
             except Exception:
