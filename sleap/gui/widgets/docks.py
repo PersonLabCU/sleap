@@ -1645,12 +1645,20 @@ class ReachesDock(DockWidget):
         self._min_thresh.setRange(-10000, 10000)
         self._min_thresh.setValue(-10.0)
         self._min_thresh.setSingleStep(1.0)
+        self._min_thresh.setToolTip(
+            "Pellet-based detection applies this threshold to the negated "
+            "RH-to-pellet distance. Positive entries are treated as negative."
+        )
         form_layout.addRow("KPN outward threshold:", self._min_thresh)
 
         self._max_thresh = QDoubleSpinBox()
         self._max_thresh.setRange(-10000, 10000)
         self._max_thresh.setValue(-7.0)
         self._max_thresh.setSingleStep(1.0)
+        self._max_thresh.setToolTip(
+            "Pellet-based detection applies this threshold to the negated "
+            "RH-to-pellet distance. Positive entries are treated as negative."
+        )
         form_layout.addRow("KPN max threshold:", self._max_thresh)
 
         self._prominence = QDoubleSpinBox()
@@ -1746,14 +1754,24 @@ class ReachesDock(DockWidget):
             return "absolute"
         return "from_pellet"
 
+    def _detection_thresholds(self):
+        """Return thresholds using the sign convention of the detection signal."""
+        min_threshold = float(self._min_thresh.value())
+        max_threshold = float(self._max_thresh.value())
+        if self._detection_method() == "from_pellet":
+            min_threshold = -abs(min_threshold)
+            max_threshold = -abs(max_threshold)
+        return min_threshold, max_threshold
+
     def batch_detection_settings(self) -> Dict[str, Any]:
         """Return the current reach-detection settings for batch analysis."""
+        min_threshold, max_threshold = self._detection_thresholds()
         return {
             "left_hand_nodes": self._selected_lh_nodes(),
             "right_hand_nodes": self._selected_rh_nodes(),
             "method": self._detection_method(),
-            "kpn_outward_threshold": float(self._min_thresh.value()),
-            "kpn_outward_max_threshold": float(self._max_thresh.value()),
+            "kpn_outward_threshold": min_threshold,
+            "kpn_outward_max_threshold": max_threshold,
             "kpn_peak_prominence": float(self._prominence.value()),
             "kpn_min_outward_travel": float(self._min_travel.value()),
             "kpn_start_padding": int(self._start_padding.value()),
@@ -2373,10 +2391,11 @@ class ReachesDock(DockWidget):
                 )
         has_events = bool(events)
 
+        min_threshold, max_threshold = self._detection_thresholds()
         detection_parameters = {
             "method": detection_method,
-            "kpn_outward_threshold": float(self._min_thresh.value()),
-            "kpn_outward_max_threshold": float(self._max_thresh.value()),
+            "kpn_outward_threshold": min_threshold,
+            "kpn_outward_max_threshold": max_threshold,
             "kpn_peak_prominence": float(self._prominence.value()),
             "kpn_min_outward_travel": float(self._min_travel.value()),
             "kpn_start_padding": int(self._start_padding.value()),
@@ -2704,14 +2723,14 @@ class ReachesDock(DockWidget):
             return traces
 
         pellet_home = np.nanmedian(pellet_xyz[pellet_ok], axis=0)
-        distance = np.sqrt(np.sum((rh_xyz - pellet_home) ** 2, axis=1))
-        distance[~rh_ok[:n]] = np.nan
-        distance[~np.all(np.isfinite(rh_xyz), axis=1)] = np.nan
+        negated_distance = -np.sqrt(np.sum((rh_xyz - pellet_home) ** 2, axis=1))
+        negated_distance[~rh_ok[:n]] = np.nan
+        negated_distance[~np.all(np.isfinite(rh_xyz), axis=1)] = np.nan
         traces.insert(
             0,
             {
                 "name": "RH pellet dist",
-                "values": distance,
+                "values": negated_distance,
                 "color": "#a3e635",
             },
         )

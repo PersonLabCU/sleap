@@ -545,11 +545,24 @@ def test_reaches_dock_builds_parameter_traces():
     assert traces[0]["color"] == "#a3e635"
     assert traces[1]["color"] == "#34d399"
     np.testing.assert_allclose(
-        traces[0]["values"], [5.0, np.nan, 15.0], equal_nan=True
+        traces[0]["values"], [-5.0, np.nan, -15.0], equal_nan=True
     )
     np.testing.assert_allclose(
         traces[1]["values"], [3.0, np.nan, 9.0], equal_nan=True
     )
+
+
+def test_reaches_dock_negates_pellet_detection_thresholds(qtbot):
+    dock = ReachesDock.__new__(ReachesDock)
+    dock._min_thresh = QDoubleSpinBox()
+    dock._max_thresh = QDoubleSpinBox()
+    dock._min_thresh.setRange(-10000, 10000)
+    dock._max_thresh.setRange(-10000, 10000)
+    dock._min_thresh.setValue(10.0)
+    dock._max_thresh.setValue(7.0)
+
+    assert dock._detection_method() == "from_pellet"
+    assert dock._detection_thresholds() == (-10.0, -7.0)
 
 
 def test_translate_points3d_h5_uses_selected_node_as_frame_origin(tmp_path):
