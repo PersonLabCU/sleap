@@ -1454,11 +1454,19 @@ class AnalysisDock(DockWidget):
             dialog._ok_button.setEnabled(True)
             dialog._cancel_button.setEnabled(False)
             if success:
+                excluded_cameras = metadata.get("excluded_camera_names", [])
+                validation_result = (
+                    "<br>Excluded camera(s): "
+                    + ", ".join(str(name) for name in excluded_cameras)
+                    if excluded_cameras
+                    else "<br>All input cameras passed validation."
+                )
                 dialog.setLabelText(
                     "<b>3D projections complete!</b><br><br>"
                     f"Triangulated {metadata.get('n_frames', 0):,} frames, "
                     f"{metadata.get('n_nodes', 0)} nodes, "
                     f"{metadata.get('n_views', 0)} cameras."
+                    f"{validation_result}"
                 )
             else:
                 dialog.setLabelText(f"<b>3D projection failed.</b><br><br>{error}")
@@ -1480,10 +1488,17 @@ class AnalysisDock(DockWidget):
             if "points3d_path" in metadata:
                 self._translate_points_edit.setText(str(metadata["points3d_path"]))
                 self._load_translate_nodes()
+            excluded_cameras = metadata.get("excluded_camera_names", [])
+            validation_summary = (
+                f" Excluded camera(s): {', '.join(excluded_cameras)}."
+                if excluded_cameras
+                else ""
+            )
             self._projection_status(
                 f"Wrote {Path(metadata['points3d_path']).name} and "
                 f"{Path(metadata['reprojections_path']).name} "
                 f"({metadata['n_frames']:,} frames, {metadata['n_nodes']} nodes)."
+                f"{validation_summary}"
             )
         else:
             self._projection_status(

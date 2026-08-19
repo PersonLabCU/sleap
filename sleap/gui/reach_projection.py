@@ -36,6 +36,11 @@ def run_3d_projection_export(
     points3d_filename: str = "points3d.h5",
     reprojections_filename: str = "reprojections.h5",
     h5_compression: Optional[str] = "lzf",
+    camera_validation: bool = True,
+    camera_validation_sample_size: int = 10_000,
+    camera_validation_min_confidence: float = 0.5,
+    camera_validation_max_median_error_px: float = 15.0,
+    camera_validation_relative_error_factor: float = 2.0,
     progress_callback: Optional[Callable[[str, int, int, str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
@@ -119,11 +124,15 @@ def run_3d_projection_export(
         [item["node_names"].index(name) for name in node_names] for item in view_data
     ]
 
-    n_views = len(view_data)
+    n_input_views = len(view_data)
     n_frames = max(item["points2d"].shape[0] for item in view_data)
     n_nodes = len(node_names)
-    points2d = np.full((n_views, n_frames, n_nodes, 2), np.nan, dtype=np.float64)
-    scores = np.full((n_views, n_frames, n_nodes), np.nan, dtype=np.float64)
+    points2d = np.full(
+        (n_input_views, n_frames, n_nodes, 2), np.nan, dtype=np.float64
+    )
+    scores = np.full(
+        (n_input_views, n_frames, n_nodes), np.nan, dtype=np.float64
+    )
     source_frame_counts = []
     for view_idx, item in enumerate(view_data):
         src_points = item["points2d"][:, node_indices[view_idx], :]
@@ -134,17 +143,72 @@ def run_3d_projection_export(
 
     session_calibration, used_camera_names = _subset_calibration(
         calibration,
-        n_views,
+        n_input_views,
         camera_names
         or [_video_stem(item["video"]) for item in view_data]
         or [p.stem for p in prediction_files],
     )
+    input_camera_names = list(used_camera_names)
+    if camera_validation:
+        report(
+            "Validating cameras",
+            0,
+            1,
+            f"Auditing {n_input_views} cameras with sampled 2D points.",
+        )
+        raise_if_canceled()
+        camera_validation_report = audit_triangulation_cameras(
+            session_calibration,
+            points2d,
+            scores,
+            input_camera_names,
+            sample_size=camera_validation_sample_size,
+            min_confidence=camera_validation_min_confidence,
+            max_median_error_px=camera_validation_max_median_error_px,
+            relative_error_factor=camera_validation_relative_error_factor,
+        )
+    else:
+        camera_validation_report = {
+            "method": "disabled",
+            "input_camera_names": input_camera_names,
+            "retained_camera_names": input_camera_names,
+            "excluded_camera_names": [],
+            "retained_camera_indices": list(range(n_input_views)),
+            "rounds": [],
+        }
+
+    retained_camera_indices = list(
+        camera_validation_report["retained_camera_indices"]
+    )
+    excluded_camera_names = list(
+        camera_validation_report["excluded_camera_names"]
+    )
+    if retained_camera_indices != list(range(n_input_views)):
+        session_calibration = session_calibration.subset_cameras(
+            retained_camera_indices
+        )
+    used_camera_names = [input_camera_names[idx] for idx in retained_camera_indices]
+    triangulation_points2d = points2d[retained_camera_indices]
+    n_views = len(used_camera_names)
+    validation_detail = (
+        f"Excluded: {', '.join(excluded_camera_names)}. "
+        f"Using {', '.join(used_camera_names)}."
+        if excluded_camera_names
+        else f"All {n_views} cameras passed."
+    )
+    report("Validating cameras", 1, 1, validation_detail)
+
     reprojection_calibration = calibration
     reprojection_camera_names = list(calibration.get_names()) or [
         str(i) for i in range(len(calibration.cameras))
     ]
     n_reprojection_views = len(reprojection_camera_names)
-    input_to_reprojection = _camera_index_map(used_camera_names, reprojection_camera_names)
+    input_to_reprojection = _camera_index_map(
+        input_camera_names, reprojection_camera_names
+    )
+    triangulation_to_reprojection = _camera_index_map(
+        used_camera_names, reprojection_camera_names
+    )
 
     points3d = np.full((n_frames, n_nodes, 3), np.nan, dtype=np.float64)
     reprojections = np.full(
@@ -168,11 +232,11 @@ def run_3d_projection_export(
     if not _triangulate_vectorized(
         session_calibration,
         reprojection_calibration,
-        points2d,
+        triangulation_points2d,
         points3d,
         reprojections,
         reprojection_error,
-        input_to_reprojection,
+        triangulation_to_reprojection,
     ):
         progress_step = max(1, n_frames // 200)
         for frame_idx in range(n_frames):
@@ -184,20 +248,26 @@ def run_3d_projection_export(
                     n_frames,
                     f"Frame {frame_idx + 1:,} of {n_frames:,}",
                 )
-            frame_points = points2d[:, frame_idx, :, :]
+            frame_points = triangulation_points2d[:, frame_idx, :, :]
             if _count_valid_views(frame_points) < 2:
                 continue
             frame_points3d = session_calibration.triangulate(frame_points)
             frame_reproj = reprojection_calibration.project(frame_points3d)
             points3d[frame_idx] = frame_points3d
             reprojections[:, frame_idx] = frame_reproj
-            for input_idx, reproj_idx in enumerate(input_to_reprojection):
+            for input_idx, reproj_idx in enumerate(triangulation_to_reprojection):
                 if reproj_idx is None:
                     continue
                 reprojection_error[reproj_idx, frame_idx] = np.linalg.norm(
                     frame_reproj[reproj_idx] - frame_points[input_idx],
                     axis=1,
                 )
+    _fill_reprojection_errors(
+        reprojections,
+        points2d,
+        reprojection_error,
+        input_to_reprojection,
+    )
     report("Triangulating", n_frames, n_frames, "Triangulation complete.")
 
     raise_if_canceled()
@@ -214,11 +284,16 @@ def run_3d_projection_export(
         "reprojections_path": str(reproj_path),
         "prediction_files": [str(p) for p in prediction_files],
         "camera_names": list(used_camera_names),
+        "input_camera_names": list(input_camera_names),
+        "triangulation_camera_names": list(used_camera_names),
+        "excluded_camera_names": list(excluded_camera_names),
+        "camera_validation": camera_validation_report,
         "reprojection_camera_names": list(reprojection_camera_names),
         "node_names": list(node_names),
         "n_frames": int(n_frames),
         "n_nodes": int(n_nodes),
         "n_views": int(n_views),
+        "n_input_views": int(n_input_views),
         "n_reprojection_views": int(n_reprojection_views),
         "source_frame_counts": source_frame_counts,
         "coordinate_system": "calibration",
@@ -248,6 +323,16 @@ def run_3d_projection_export(
             f.create_dataset(
                 "camera_names",
                 data=np.asarray(list(used_camera_names), dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset(
+                "input_camera_names",
+                data=np.asarray(input_camera_names, dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset(
+                "excluded_camera_names",
+                data=np.asarray(excluded_camera_names, dtype=object),
                 dtype=str_dtype,
             )
             f.attrs["metadata_json"] = json.dumps(metadata)
@@ -287,6 +372,21 @@ def run_3d_projection_export(
             f.create_dataset(
                 "camera_names",
                 data=np.asarray(list(reprojection_camera_names), dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset(
+                "input_camera_names",
+                data=np.asarray(input_camera_names, dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset(
+                "triangulation_camera_names",
+                data=np.asarray(list(used_camera_names), dtype=object),
+                dtype=str_dtype,
+            )
+            f.create_dataset(
+                "excluded_camera_names",
+                data=np.asarray(excluded_camera_names, dtype=object),
                 dtype=str_dtype,
             )
             f.create_dataset(
@@ -739,6 +839,191 @@ def _scores_for_reprojection_cameras(
 def _count_valid_views(points: np.ndarray) -> int:
     valid_by_view = np.any(np.all(np.isfinite(points), axis=2), axis=1)
     return int(np.sum(valid_by_view))
+
+
+def audit_triangulation_cameras(
+    calibration,
+    points2d: np.ndarray,
+    scores: Optional[np.ndarray],
+    camera_names: Sequence[str],
+    *,
+    sample_size: int = 10_000,
+    min_confidence: float = 0.5,
+    max_median_error_px: float = 15.0,
+    relative_error_factor: float = 2.0,
+    min_samples: int = 100,
+) -> Dict[str, Any]:
+    """Audit cameras with sampled vectorized leave-one-camera-out projection.
+
+    A camera is excluded only when its median held-out reprojection error is
+    above both an absolute pixel threshold and a multiple of the other active
+    cameras' median errors. The audit is repeated after each exclusion while
+    preserving at least two cameras for triangulation.
+    """
+    points2d = np.asarray(points2d, dtype=np.float64)
+    if points2d.ndim != 4 or points2d.shape[-1] != 2:
+        raise ValueError(
+            "Expected points2d with shape (cameras, frames, nodes, 2)."
+        )
+    if len(camera_names) != points2d.shape[0]:
+        raise ValueError("Camera names do not match the points2d camera axis.")
+
+    n_cameras = points2d.shape[0]
+    report: Dict[str, Any] = {
+        "method": "sampled_vectorized_leave_one_camera_out",
+        "sample_size_per_camera": int(sample_size),
+        "min_confidence": float(min_confidence),
+        "max_median_error_px": float(max_median_error_px),
+        "relative_error_factor": float(relative_error_factor),
+        "min_samples": int(min_samples),
+        "input_camera_names": list(camera_names),
+        "retained_camera_names": list(camera_names),
+        "excluded_camera_names": [],
+        "retained_camera_indices": list(range(n_cameras)),
+        "rounds": [],
+    }
+    if n_cameras < 3:
+        report["skipped_reason"] = "At least three cameras are required."
+        return report
+
+    flat_points = points2d.reshape(n_cameras, -1, 2)
+    valid = np.all(np.isfinite(flat_points), axis=2)
+    if scores is not None:
+        flat_scores = np.asarray(scores, dtype=np.float64).reshape(n_cameras, -1)
+        if flat_scores.shape != valid.shape:
+            raise ValueError("Scores do not match the points2d frame/node axes.")
+        valid &= np.isfinite(flat_scores) & (flat_scores >= min_confidence)
+
+    active = list(range(n_cameras))
+    excluded: List[int] = []
+    while len(active) >= 3:
+        round_metrics: List[Dict[str, Any]] = []
+        for held_out in active:
+            other_indices = [idx for idx in active if idx != held_out]
+            candidate_mask = valid[held_out] & (
+                np.sum(valid[other_indices], axis=0) >= 2
+            )
+            candidate_indices = np.flatnonzero(candidate_mask)
+            n_candidates = int(candidate_indices.size)
+            if n_candidates > sample_size:
+                positions = np.linspace(
+                    0,
+                    n_candidates - 1,
+                    num=sample_size,
+                    dtype=np.int64,
+                )
+                sample_indices = candidate_indices[positions]
+            else:
+                sample_indices = candidate_indices
+
+            metrics: Dict[str, Any] = {
+                "camera_index": int(held_out),
+                "camera_name": str(camera_names[held_out]),
+                "candidate_count": n_candidates,
+                "sample_count": int(sample_indices.size),
+                "median_error_px": None,
+                "p95_error_px": None,
+                "fraction_above_threshold": None,
+            }
+            if sample_indices.size < min_samples:
+                metrics["status"] = "insufficient_samples"
+                round_metrics.append(metrics)
+                continue
+
+            other_points = flat_points[other_indices][:, sample_indices, :].copy()
+            other_valid = valid[other_indices][:, sample_indices]
+            other_points[~other_valid] = np.nan
+            try:
+                held_out_points3d = calibration.subset_cameras(
+                    other_indices
+                ).triangulate(other_points, fast=True)
+                held_out_projection = calibration.cameras[held_out].project(
+                    held_out_points3d
+                ).reshape(-1, 2)
+                errors = np.linalg.norm(
+                    held_out_projection - flat_points[held_out, sample_indices],
+                    axis=1,
+                )
+                errors = errors[np.isfinite(errors)]
+            except Exception as exc:
+                metrics["status"] = "audit_error"
+                metrics["error"] = str(exc)
+                round_metrics.append(metrics)
+                continue
+
+            metrics["sample_count"] = int(errors.size)
+            if errors.size < min_samples:
+                metrics["status"] = "insufficient_samples"
+            else:
+                metrics["status"] = "ok"
+                metrics["median_error_px"] = float(np.median(errors))
+                metrics["p95_error_px"] = float(np.percentile(errors, 95))
+                metrics["fraction_above_threshold"] = float(
+                    np.mean(errors > max_median_error_px)
+                )
+            round_metrics.append(metrics)
+
+        valid_metrics = [
+            item
+            for item in round_metrics
+            if item.get("status") == "ok"
+            and item.get("median_error_px") is not None
+        ]
+        decision: Dict[str, Any] = {
+            "active_camera_names": [camera_names[idx] for idx in active],
+            "camera_metrics": round_metrics,
+            "excluded_camera_name": None,
+        }
+        if len(valid_metrics) < 3:
+            decision["decision"] = "keep_all_insufficient_valid_audits"
+            report["rounds"].append(decision)
+            break
+
+        worst = max(valid_metrics, key=lambda item: item["median_error_px"])
+        other_medians = [
+            item["median_error_px"]
+            for item in valid_metrics
+            if item["camera_index"] != worst["camera_index"]
+        ]
+        reference_median = float(np.median(other_medians))
+        exclusion_threshold = max(
+            float(max_median_error_px),
+            float(relative_error_factor) * reference_median,
+        )
+        decision["reference_median_error_px"] = reference_median
+        decision["exclusion_threshold_px"] = exclusion_threshold
+        if worst["median_error_px"] <= exclusion_threshold:
+            decision["decision"] = "keep_all_no_clear_outlier"
+            report["rounds"].append(decision)
+            break
+
+        excluded_index = int(worst["camera_index"])
+        decision["decision"] = "exclude_clear_outlier"
+        decision["excluded_camera_name"] = str(camera_names[excluded_index])
+        report["rounds"].append(decision)
+        excluded.append(excluded_index)
+        active.remove(excluded_index)
+
+    report["excluded_camera_names"] = [camera_names[idx] for idx in excluded]
+    report["retained_camera_names"] = [camera_names[idx] for idx in active]
+    report["retained_camera_indices"] = [int(idx) for idx in active]
+    return report
+
+
+def _fill_reprojection_errors(
+    reprojections: np.ndarray,
+    input_points2d: np.ndarray,
+    reprojection_error: np.ndarray,
+    input_to_reprojection: Sequence[Optional[int]],
+) -> None:
+    """Fill per-input-camera errors, including cameras excluded by the audit."""
+    for input_idx, reproj_idx in enumerate(input_to_reprojection):
+        if reproj_idx is None:
+            continue
+        reprojection_error[reproj_idx] = np.linalg.norm(
+            reprojections[reproj_idx] - input_points2d[input_idx],
+            axis=2,
+        )
 
 
 def _triangulate_vectorized(

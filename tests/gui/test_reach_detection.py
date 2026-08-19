@@ -19,6 +19,7 @@ from sleap.gui.reach_projection import (
     _match_camera_names,
     _scores_for_reprojection_cameras,
     _triangulate_vectorized,
+    audit_triangulation_cameras,
     load_points3d_h5,
     translate_points3d_h5,
 )
@@ -349,6 +350,62 @@ def test_vectorized_projection_writes_full_reprojection_camera_set():
     np.testing.assert_allclose(points3d[0, 0], [10, 10, 0])
     assert np.all(np.isfinite(reprojection_error[[0, 2, 4]]))
     assert np.all(np.isnan(reprojection_error[[1, 3, 5]]))
+
+
+def test_camera_audit_excludes_clear_held_out_reprojection_outlier():
+    class FakeCamera:
+        def __init__(self, offset):
+            self.offset = np.asarray(offset, dtype=np.float64)
+
+        def project(self, points3d):
+            projected = points3d[:, :2] + self.offset
+            return projected[:, np.newaxis, :]
+
+    class FakeSubsetCalibration:
+        def __init__(self, offsets, camera_indices):
+            self.offsets = offsets
+            self.camera_indices = camera_indices
+
+        def triangulate(self, points, fast=False):
+            aligned_points = np.stack(
+                [
+                    points[local_idx] - self.offsets[camera_idx]
+                    for local_idx, camera_idx in enumerate(self.camera_indices)
+                ],
+                axis=0,
+            )
+            xy = np.nanmean(aligned_points, axis=0)
+            return np.column_stack([xy, np.zeros(xy.shape[0])])
+
+    class FakeCalibration:
+        def __init__(self, offsets):
+            self.offsets = np.asarray(offsets, dtype=np.float64)
+            self.cameras = [FakeCamera(offset) for offset in self.offsets]
+
+        def subset_cameras(self, camera_indices):
+            return FakeSubsetCalibration(self.offsets, camera_indices)
+
+    offsets = np.asarray([[0, 0], [10, 0], [0, 10], [10, 10]], dtype=np.float64)
+    world_xy = np.arange(400, dtype=np.float64).reshape(20, 10, 2)
+    points2d = world_xy[np.newaxis, ...] + offsets[:, np.newaxis, np.newaxis, :]
+    points2d[3] += np.asarray([100, 0])
+    scores = np.ones(points2d.shape[:-1], dtype=np.float64)
+
+    report = audit_triangulation_cameras(
+        FakeCalibration(offsets),
+        points2d,
+        scores,
+        ["front", "right", "side", "stim"],
+        sample_size=100,
+        max_median_error_px=15.0,
+        relative_error_factor=2.0,
+        min_samples=20,
+    )
+
+    assert report["excluded_camera_names"] == ["stim"]
+    assert report["retained_camera_indices"] == [0, 1, 2]
+    assert report["rounds"][0]["decision"] == "exclude_clear_outlier"
+    assert report["rounds"][1]["decision"] == "keep_all_no_clear_outlier"
 
 
 def test_reaches_dock_matches_reprojection_camera_by_camera_token():
