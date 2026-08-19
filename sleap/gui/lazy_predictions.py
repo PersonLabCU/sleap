@@ -82,7 +82,7 @@ class VideoPredictionBlock:
 
 @dataclass
 class ExternalPredictionSet:
-    """Compact prediction data loaded from one SLEAP prediction file."""
+    """Compact prediction data loaded from a SLEAP prediction file."""
 
     source_path: str
     blocks: List[VideoPredictionBlock] = field(default_factory=list)
@@ -91,8 +91,23 @@ class ExternalPredictionSet:
 
     @classmethod
     def from_file(cls, path: str) -> "ExternalPredictionSet":
-        """Load a prediction file and compact its predictions into arrays."""
-        labels = sio.load_slp(path)
+        """Load SLP or Analysis HDF5 predictions and compact them into arrays."""
+        path = str(path)
+        suffix = Path(path).suffix.lower()
+        is_analysis_h5 = False
+        if suffix in {".h5", ".hdf5"}:
+            import h5py
+
+            try:
+                with h5py.File(path, "r") as file:
+                    is_analysis_h5 = "track_occupancy" in file
+            except OSError:
+                pass
+
+        if is_analysis_h5:
+            labels = sio.load_analysis_h5(path)
+        else:
+            labels = sio.load_slp(path)
         return cls.from_labels(labels, source_path=path)
 
     @classmethod

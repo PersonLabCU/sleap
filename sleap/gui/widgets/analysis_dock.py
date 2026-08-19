@@ -733,7 +733,12 @@ class AnalysisDock(DockWidget):
         filenames, _ = FileDialog.openMultiple(
             self,
             caption="Select prediction files to preview",
-            filter="SLEAP Files (*.slp);;All Files (*)",
+            filter=(
+                "Prediction Files (*.slp *.h5 *.hdf5);;"
+                "SLEAP Files (*.slp);;"
+                "SLEAP Analysis HDF5 (*.h5 *.hdf5);;"
+                "All Files (*)"
+            ),
         )
         filenames = [str(filename) for filename in filenames or []]
         if not filenames:

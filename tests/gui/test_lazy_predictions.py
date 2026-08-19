@@ -1,3 +1,4 @@
+import h5py
 import numpy as np
 import sleap_io as sio
 
@@ -51,3 +52,34 @@ def test_external_prediction_manager_can_pin_file_to_one_video():
 
     assert manager.instances_for(front_video, 0) == []
     assert len(manager.instances_for(side_video, 0)) == 1
+
+
+def test_external_prediction_set_loads_analysis_h5(tmp_path, monkeypatch):
+    source = tmp_path / "side.analysis.h5"
+    with h5py.File(source, "w") as file:
+        file.create_dataset("track_occupancy", data=np.ones((1, 1)))
+
+    expected = _prediction_set("side.mp4")
+    video = sio.Video.from_filename("side.mp4")
+    labels = sio.Labels(
+        [
+            sio.LabeledFrame(
+                video=video,
+                frame_idx=0,
+                instances=expected.blocks[0].instances_for_frame(0),
+            )
+        ]
+    )
+    calls = []
+
+    def fake_load_analysis_h5(path):
+        calls.append(path)
+        return labels
+
+    monkeypatch.setattr(sio, "load_analysis_h5", fake_load_analysis_h5)
+
+    loaded = ExternalPredictionSet.from_file(str(source))
+
+    assert calls == [str(source)]
+    assert loaded.source_path == str(source)
+    assert loaded.total_instances == 1
