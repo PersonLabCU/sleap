@@ -1273,8 +1273,8 @@ class AnalysisDock(DockWidget):
         # arguments (which overflows Windows's ~32k-char command-line limit).
         # "suggested" uses DatasetItemForInference so the CLI filters server-side.
         # "all" / "unlabeled" use VideoItemForInference with frames=None so no
-        # --frames flag is emitted; with _prediction_mode="add" user labels are
-        # never overwritten regardless.
+        # --frames flag is emitted. Results replace prior predictions while
+        # preserving user-labeled instances.
         inference_items: List = []
         total_frames = 0
 
@@ -1302,8 +1302,7 @@ class AnalysisDock(DockWidget):
                     VideoItemForInference(
                         video=video,
                         frames=None,
-                        labels_path=labels_filename,
-                        video_idx=video_idx,
+                        use_absolute_path=True,
                     )
                 )
 
