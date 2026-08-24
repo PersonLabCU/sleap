@@ -3,6 +3,7 @@
 import shutil
 from pathlib import Path
 
+import h5py
 import numpy as np
 from qtpy.QtWidgets import QMessageBox
 import sleap_io as sio
@@ -171,9 +172,11 @@ def test_session_metadata_round_trip(tmp_path, qtbot, small_robot_mp4_vid: Video
 
 
 def test_find_session_video_files(tmp_path):
-    """Test session discovery only returns supported files in a stable order."""
+    """Test session discovery excludes HDF5 files and uses a stable order."""
     (tmp_path / "cam_b.mp4").write_text("")
     (tmp_path / "cam_a.avi").write_text("")
+    with h5py.File(tmp_path / "analysis.h5", "w") as file:
+        file.create_dataset("video", shape=(2, 8, 8, 1), dtype="uint8")
     (tmp_path / "calibration.toml").write_text("")
     (tmp_path / "notes.txt").write_text("")
     nested = tmp_path / "nested"

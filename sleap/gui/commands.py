@@ -62,11 +62,7 @@ from qtpy import QtCore, QtGui, QtWidgets
 
 from sleap.gui.dialogs.delete import DeleteDialog
 from sleap.gui.dialogs.filedialog import FileDialog
-from sleap.gui.dialogs.importvideos import (
-    HDF5_VIDEO_EXTS,
-    ImportVideos,
-    find_h5_video_datasets,
-)
+from sleap.gui.dialogs.importvideos import HDF5_VIDEO_EXTS, ImportVideos
 from sleap.gui.dialogs.merge import MergeDialog, ReplaceSkeletonTableDialog
 from sleap.gui.dialogs.message import MessageDialog
 from sleap.gui.dialogs.missingfiles import MissingFilesDialog
@@ -3013,9 +3009,11 @@ class AddSession(EditCommand):
 
     @staticmethod
     def find_video_files(session_path: Union[str, Path]) -> List[str]:
-        """Find supported video files directly inside a session folder."""
+        """Find non-HDF5 video files directly inside a session folder."""
         session_path = Path(session_path)
-        supported_exts = {f".{ext.lower()}" for ext in available_video_exts()}
+        supported_exts = {
+            f".{ext.lower()}" for ext in available_video_exts()
+        } - HDF5_VIDEO_EXTS
         files = []
         for path in sorted(session_path.iterdir(), key=lambda p: p.name.lower()):
             suffix = path.suffix.lower()
@@ -3024,8 +3022,6 @@ class AddSession(EditCommand):
             # Session folders often contain project/prediction .slp files from
             # prior analyses. Add Session should only import source videos.
             if suffix == ".slp":
-                continue
-            if suffix in HDF5_VIDEO_EXTS and not find_h5_video_datasets(str(path)):
                 continue
             files.append(str(path))
         return files
