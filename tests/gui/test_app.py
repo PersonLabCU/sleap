@@ -724,6 +724,7 @@ def test_external_preview_double_click_creates_instance(
         points=np.zeros((len(skeleton.nodes), 2)),
         skeleton=skeleton,
         score=0.9,
+        track=sio.Track(name="preview track"),
     )
     assert preview_pred not in target_lf.instances
 
@@ -751,6 +752,17 @@ def test_external_preview_double_click_creates_instance(
     assert len(user_instances) == user_count_before + 1
     assert user_instances[-1].from_predicted is adopted_prediction
     assert user_instances[-1].skeleton is app.labels.skeleton
+    assert any(track is user_instances[-1].track for track in app.labels.tracks)
+
+    same_named_track = sio.Track(name="preview track")
+    next_preview = PredictedInstance(
+        points=np.zeros((len(skeleton.nodes), 2)),
+        skeleton=skeleton,
+        score=0.8,
+        track=same_named_track,
+    )
+    canonical = app._canonicalize_preview_prediction(next_preview)
+    assert canonical.track is user_instances[-1].track
 
 
 def test_trail_node_menu(qtbot, centered_pair_predictions: Labels):

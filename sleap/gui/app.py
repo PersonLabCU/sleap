@@ -2377,8 +2377,10 @@ class MainWindow(QMainWindow):
     def _canonicalize_preview_prediction(
         self, instance: PredictedInstance
     ) -> PredictedInstance:
-        """Return a preview prediction using a project-owned skeleton."""
+        """Return a preview prediction using project-owned skeleton and track refs."""
+        track = self._matching_project_track(getattr(instance, "track", None))
         if any(instance.skeleton is skel for skel in self.labels.skeletons):
+            instance.track = track
             return instance
 
         skeleton = self._matching_project_skeleton(instance.skeleton)
@@ -2400,7 +2402,7 @@ class MainWindow(QMainWindow):
             skeleton=skeleton,
             point_scores=point_scores,
             score=getattr(instance, "score", 0.0),
-            track=getattr(instance, "track", None),
+            track=track,
             tracking_score=getattr(instance, "tracking_score", None),
         )
 
@@ -2410,6 +2412,15 @@ class MainWindow(QMainWindow):
                 canonical.points[i]["visible"] = instance.points[source_idx]["visible"]
 
         return canonical
+
+    def _matching_project_track(self, source_track):
+        """Return the project-owned track with the source track's name, if any."""
+        if source_track is None:
+            return None
+        for track in self.labels.tracks:
+            if track is source_track or track.name == source_track.name:
+                return track
+        return source_track
 
     def _matching_project_skeleton(self, source_skeleton: Skeleton) -> Skeleton:
         """Find the project skeleton matching an external prediction skeleton."""

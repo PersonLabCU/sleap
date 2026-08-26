@@ -104,7 +104,7 @@ class ExternalPredictionLoadWorker(QtCore.QThread):
     """Background worker for compact external prediction preview loading."""
 
     statusUpdate = QtCore.Signal(str)
-    finished = QtCore.Signal(bool, object, str)
+    resultReady = QtCore.Signal(bool, object, str)
 
     def __init__(self, prediction_files: List[str], parent=None):
         super().__init__(parent)
@@ -118,10 +118,10 @@ class ExternalPredictionLoadWorker(QtCore.QThread):
                 prediction_sets.append(ExternalPredictionSet.from_file(filename))
         except Exception as exc:
             logger.exception("External prediction preview load failed")
-            self.finished.emit(False, [], str(exc))
+            self.resultReady.emit(False, [], str(exc))
             return
 
-        self.finished.emit(True, prediction_sets, "")
+        self.resultReady.emit(True, prediction_sets, "")
 
 
 class AnalysisDock(DockWidget):
@@ -146,8 +146,10 @@ class AnalysisDock(DockWidget):
             model_type=None,
             tab_with=tab_with,
         )
+        self._prediction_load_worker = None
+        self._prediction_load_labels = None
         # Refresh the video list whenever the project or its videos change.
-        main_window.state.connect("labels", lambda _: self._refresh_videos())
+        main_window.state.connect("labels", self._on_project_labels_changed)
         main_window.state.connect("video", lambda _: self._refresh_videos())
 
     # ── DockWidget interface ─────────────────────────────────────────────── #
@@ -752,22 +754,44 @@ class AnalysisDock(DockWidget):
                 )
                 return
 
-        self._preview_link_btn.setEnabled(False)
+        self._set_prediction_preview_loading(True)
         self._prediction_preview_status("Loading prediction preview...")
         worker = ExternalPredictionLoadWorker(filenames, parent=self)
         self._prediction_load_worker = worker
+        self._prediction_load_labels = self.main_window.labels
         worker.statusUpdate.connect(self._prediction_preview_status)
-        worker.finished.connect(self._on_external_predictions_loaded)
+        worker.resultReady.connect(self._on_external_predictions_loaded)
+        worker.finished.connect(self._on_prediction_load_thread_finished)
+        worker.finished.connect(worker.deleteLater)
         worker.start()
+
+    def _set_prediction_preview_loading(self, loading: bool) -> None:
+        """Keep preview controls consistent while a background load is active."""
+        self._preview_link_btn.setEnabled(not loading)
+        self._preview_clear_btn.setEnabled(not loading)
+        self._preview_import_frame_btn.setEnabled(not loading)
+
+    def _on_prediction_load_thread_finished(self) -> None:
+        """Release the completed worker without retaining Qt thread objects."""
+        worker = self.sender()
+        if self._prediction_load_worker is worker:
+            self._prediction_load_worker = None
+            self._prediction_load_labels = None
+        self._set_prediction_preview_loading(False)
 
     def _on_external_predictions_loaded(
         self, success: bool, prediction_sets: object, error: str
     ) -> None:
-        self._preview_link_btn.setEnabled(True)
-        self._prediction_load_worker = None
         if not success:
             self._prediction_preview_status(
                 f"Prediction preview load failed: {error}", error=True
+            )
+            return
+
+        if self._prediction_load_labels is not self.main_window.labels:
+            self._prediction_preview_status(
+                "The project changed while predictions were loading; ignored the "
+                "stale preview result."
             )
             return
 
@@ -797,6 +821,21 @@ class AnalysisDock(DockWidget):
             f"{target_text}{' Loaded skeleton from predictions.' if skeleton_loaded else ''}"
         )
         self.main_window.plotFrame()
+
+    def _on_project_labels_changed(self, _labels) -> None:
+        """Clear previews when a different project is loaded into this window."""
+        self._refresh_videos()
+        manager = self.main_window.state.get("external predictions", default=None)
+        had_previews = manager is not None and len(manager) > 0
+        if manager is not None:
+            manager.clear()
+        if hasattr(self, "_preview_pred_list"):
+            had_previews = had_previews or self._preview_pred_list.count() > 0
+            self._preview_pred_list.clear()
+        if had_previews:
+            self._prediction_preview_status(
+                "Cleared prediction previews from the previous project."
+            )
 
     def _load_skeleton_from_predictions_if_needed(
         self, prediction_sets: List[ExternalPredictionSet]

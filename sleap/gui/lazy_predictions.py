@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import sleap_io as sio
@@ -22,55 +22,67 @@ def video_key(video_or_filename) -> str:
 
 @dataclass
 class VideoPredictionBlock:
-    """Prediction arrays for one video in an external prediction file."""
+    """Compact prediction arrays for one video in an external prediction file."""
 
     video_name: str
     video_key: str
     source_path: str
     skeleton: object
+    video_frame_count: int
+    frame_ranges: Dict[int, Tuple[int, int]]
     points: np.ndarray
     point_scores: np.ndarray
     instance_scores: np.ndarray
-    track_names: np.ndarray
+    track_names: List[Optional[str]]
 
     @property
     def frame_count(self) -> int:
-        return int(self.points.shape[0])
+        return self.video_frame_count
 
     @property
     def max_instances(self) -> int:
-        return int(self.points.shape[1])
+        return max(
+            (stop - start for start, stop in self.frame_ranges.values()), default=0
+        )
 
     @property
     def node_count(self) -> int:
-        return int(self.points.shape[2])
+        return int(self.points.shape[1])
+
+    @property
+    def instance_count(self) -> int:
+        return int(self.points.shape[0])
 
     def instances_for_frame(self, frame_idx: int) -> List[PredictedInstance]:
         """Create temporary prediction instances for one frame."""
         if frame_idx < 0 or frame_idx >= self.frame_count:
             return []
 
+        frame_range = self.frame_ranges.get(int(frame_idx))
+        if frame_range is None:
+            return []
+
         instances = []
-        for inst_idx in range(self.max_instances):
-            points = self.points[frame_idx, inst_idx]
+        for inst_idx in range(*frame_range):
+            points = self.points[inst_idx]
             if not np.isfinite(points[..., 0]).any():
                 continue
 
-            score = self.instance_scores[frame_idx, inst_idx]
+            score = self.instance_scores[inst_idx]
             if not np.isfinite(score):
-                finite_scores = self.point_scores[frame_idx, inst_idx]
+                finite_scores = self.point_scores[inst_idx]
                 finite_scores = finite_scores[np.isfinite(finite_scores)]
                 score = float(np.mean(finite_scores)) if len(finite_scores) else 0.0
                 if not np.isfinite(score):
                     score = 0.0
 
-            track_name = self.track_names[frame_idx, inst_idx]
+            track_name = self.track_names[inst_idx]
             track = Track(name=str(track_name)) if track_name else None
             instances.append(
                 PredictedInstance.from_numpy(
                     points.astype(np.float64, copy=False),
                     skeleton=self.skeleton,
-                    point_scores=self.point_scores[frame_idx, inst_idx].astype(
+                    point_scores=self.point_scores[inst_idx].astype(
                         np.float64, copy=False
                     ),
                     score=float(score),
@@ -133,12 +145,7 @@ class ExternalPredictionSet:
 
     @property
     def total_instances(self) -> int:
-        return int(
-            sum(
-                np.isfinite(block.points[..., 0]).any(axis=2).sum()
-                for block in self.blocks
-            )
-        )
+        return sum(block.instance_count for block in self.blocks)
 
     def assign_to_video(self, video: Video) -> None:
         """Pin this prediction file to a single project video."""
@@ -223,34 +230,52 @@ def _build_video_block(
     skeleton = first_instance.skeleton
     node_count = len(skeleton.nodes)
     max_frame_idx = max(frame_idx for frame_idx, _ in frame_predictions)
-    max_instances = max(len(predictions) for _, predictions in frame_predictions)
-    frame_count = _safe_frame_count(video, fallback=max_frame_idx + 1)
+    # The preview only needs prediction indices. Avoid calling len(video) here:
+    # that may open a decoder in this background-loading thread while the GUI's
+    # video worker is reading the same media.
+    frame_count = int(max_frame_idx) + 1
 
-    points = np.full(
-        (frame_count, max_instances, node_count, 2), np.nan, dtype=np.float32
-    )
-    point_scores = np.full(
-        (frame_count, max_instances, node_count), np.nan, dtype=np.float32
-    )
-    instance_scores = np.full((frame_count, max_instances), np.nan, dtype=np.float32)
-    track_names = np.empty((frame_count, max_instances), dtype=object)
-    track_names[:] = None
-
-    for frame_idx, predictions in frame_predictions:
+    # Store only predictions that actually exist. The previous representation
+    # allocated frame_count * max_instances slots, including empty frames and
+    # unused instance slots. Full-length, multi-camera videos could therefore
+    # exhaust system memory while merely linking a preview file.
+    records = []
+    for frame_idx, predictions in sorted(frame_predictions, key=lambda item: item[0]):
         if frame_idx < 0 or frame_idx >= frame_count:
             continue
-        for inst_idx, inst in enumerate(predictions[:max_instances]):
+        for inst in predictions:
             if inst.skeleton is not skeleton:
                 continue
             xy = np.asarray(inst.numpy(), dtype=np.float32)
-            points[frame_idx, inst_idx, : min(node_count, len(xy))] = xy[:node_count]
-            scores = _point_scores(inst, node_count)
-            point_scores[frame_idx, inst_idx, : len(scores)] = scores
-            score = getattr(inst, "score", np.nan)
-            instance_scores[frame_idx, inst_idx] = score if score is not None else np.nan
-            track = getattr(inst, "track", None)
-            if track is not None and getattr(track, "name", None):
-                track_names[frame_idx, inst_idx] = track.name
+            if not np.isfinite(xy[..., 0]).any():
+                continue
+            records.append((int(frame_idx), inst))
+
+    if not records:
+        return None
+
+    points = np.full((len(records), node_count, 2), np.nan, dtype=np.float32)
+    point_scores = np.full((len(records), node_count), np.nan, dtype=np.float32)
+    instance_scores = np.full(len(records), np.nan, dtype=np.float32)
+    track_names: List[Optional[str]] = [None] * len(records)
+    frame_ranges: Dict[int, Tuple[int, int]] = {}
+
+    for inst_idx, (frame_idx, inst) in enumerate(records):
+        xy = np.asarray(inst.numpy(), dtype=np.float32)
+        points[inst_idx, : min(node_count, len(xy))] = xy[:node_count]
+        scores = _point_scores(inst, node_count)
+        point_scores[inst_idx, : len(scores)] = scores
+        score = getattr(inst, "score", np.nan)
+        instance_scores[inst_idx] = score if score is not None else np.nan
+        track = getattr(inst, "track", None)
+        if track is not None and getattr(track, "name", None):
+            track_names[inst_idx] = track.name
+
+        if frame_idx in frame_ranges:
+            start, _ = frame_ranges[frame_idx]
+            frame_ranges[frame_idx] = (start, inst_idx + 1)
+        else:
+            frame_ranges[frame_idx] = (inst_idx, inst_idx + 1)
 
     filename = getattr(video, "filename", "")
     if isinstance(filename, list):
@@ -261,18 +286,13 @@ def _build_video_block(
         video_key=video_key(video),
         source_path=str(source_path),
         skeleton=skeleton,
+        video_frame_count=frame_count,
+        frame_ranges=frame_ranges,
         points=points,
         point_scores=point_scores,
         instance_scores=instance_scores,
         track_names=track_names,
     )
-
-
-def _safe_frame_count(video: Video, fallback: int) -> int:
-    try:
-        return max(int(len(video)), int(fallback))
-    except Exception:
-        return int(fallback)
 
 
 def _point_scores(instance: PredictedInstance, node_count: int) -> np.ndarray:
