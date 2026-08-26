@@ -37,6 +37,7 @@ class Preferences(object):
         "show non-visible nodes": True,
         "show mean node score": False,
         "share usage data": True,
+        "auto save": False,
         "node marker sizes": (1, 2, 3, 4, 6, 8, 12),
         "node label sizes": (6, 9, 12, 18, 24, 36),
         # Training pipeline settings (system-level, persist across projects)

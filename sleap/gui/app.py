@@ -163,6 +163,8 @@ from sleap.sleap_io_adaptors.lf_labels_utils import (
 
 logger = getLogger(__name__)
 
+AUTO_SAVE_INTERVAL_MS = 30 * 60 * 1000
+
 
 def _install_exception_hook():
     """Install a global exception hook that shows a dialog instead of crashing silently.
@@ -293,6 +295,7 @@ class MainWindow(QMainWindow):
         self.state["propagate track labels"] = prefs["propagate track labels"]
         self.state["node label size"] = prefs["node label size"]
         self.state["share usage data"] = prefs["share usage data"]
+        self.state["auto save"] = prefs["auto save"]
         self.state["experimental features"] = False
         self.state["skeleton_preview_image"] = None
         self.state["skeleton_description"] = "No skeleton loaded yet"
@@ -384,6 +387,7 @@ class MainWindow(QMainWindow):
         prefs["trail alpha"] = self.state["trail_alpha"]
         prefs["trail alpha fade"] = self.state["trail_alpha_fade"]
         prefs["share usage data"] = self.state["share usage data"]
+        prefs["auto save"] = self.state["auto save"]
 
         # Save preferences.
         prefs.save()
@@ -483,10 +487,36 @@ class MainWindow(QMainWindow):
 
         self._load_overlays()
 
+        self.auto_save_timer = QtCore.QTimer(self)
+        self.auto_save_timer.setInterval(AUTO_SAVE_INTERVAL_MS)
+        self.auto_save_timer.timeout.connect(self._auto_save)
+        self.state.connect("auto save", self._set_auto_save_enabled)
+        if self.state["auto save"]:
+            self.auto_save_timer.start()
+
         # Create timer to update state of gui at 20 millisec. intervals
         self.update_gui_timer = QtCore.QTimer()
         self.update_gui_timer.timeout.connect(self._update_gui_state)
         self.update_gui_timer.start(20)
+
+    def _set_auto_save_enabled(self, enabled: bool):
+        """Start or stop auto-save and persist the user's choice."""
+        prefs["auto save"] = enabled
+        prefs.save()
+
+        if enabled:
+            self.auto_save_timer.start()
+        else:
+            self.auto_save_timer.stop()
+
+    def _auto_save(self):
+        """Save changed projects that already have a destination filename."""
+        if (
+            self.state["auto save"]
+            and self.state["has_changes"]
+            and self.state["filename"] is not None
+        ):
+            self.commands.saveProject()
 
     def _create_video_player(self):
         """Creates and connects :class:`QtVideoPlayer` for gui."""
@@ -643,6 +673,15 @@ class MainWindow(QMainWindow):
         fileMenu.addSeparator()
         add_menu_item(fileMenu, "save", "Save", self.commands.saveProject)
         add_menu_item(fileMenu, "save as", "Save As...", self.commands.saveProjectAs)
+        auto_save_action = add_menu_check_item(
+            fileMenu,
+            "auto save",
+            "Auto-Save Every 30 Minutes",
+        )
+        auto_save_action.setStatusTip(
+            "Automatically save unsaved changes every 30 minutes after the project "
+            "has been saved once."
+        )
 
         export_analysis_menu = fileMenu.addMenu("Export Analysis HDF5...")
         add_menu_item(

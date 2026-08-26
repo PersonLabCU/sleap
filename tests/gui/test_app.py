@@ -486,6 +486,64 @@ def test_app_drag_and_drop_open(qtbot, centered_pair_predictions_slp_path):
     app.closeAllWindows()
 
 
+def test_auto_save_option(qtbot, monkeypatch):
+    """Auto-save is opt-in, persistent, and only saves changed named projects."""
+    from sleap.gui import app as app_module
+
+    original_preference = app_module.prefs["auto save"]
+    preference_saves = []
+    monkeypatch.setattr(
+        app_module.prefs,
+        "save",
+        lambda: preference_saves.append(app_module.prefs["auto save"]),
+    )
+
+    window = MainWindow(no_usage_data=True)
+    qtbot.addWidget(window)
+
+    try:
+        window.state["auto save"] = False
+        preference_saves.clear()
+
+        action = window._menu_actions["auto save"]
+        assert action.text() == "Auto-Save Every 30 Minutes"
+        assert action.isCheckable()
+        assert not action.isChecked()
+        assert window.auto_save_timer.interval() == 30 * 60 * 1000
+        assert not window.auto_save_timer.isActive()
+
+        action.trigger()
+        assert window.state["auto save"]
+        assert window.auto_save_timer.isActive()
+        assert preference_saves == [True]
+
+        project_saves = []
+        monkeypatch.setattr(
+            window.commands, "saveProject", lambda: project_saves.append(True)
+        )
+
+        window.state["has_changes"] = False
+        window.state["filename"] = "project.slp"
+        window._auto_save()
+        assert project_saves == []
+
+        window.state["has_changes"] = True
+        window._auto_save()
+        assert project_saves == [True]
+
+        window.state["filename"] = None
+        window._auto_save()
+        assert project_saves == [True]
+
+        action.trigger()
+        assert not window.state["auto save"]
+        assert not window.auto_save_timer.isActive()
+        assert preference_saves == [True, False]
+    finally:
+        window.state["has_changes"] = False
+        window.state["auto save"] = original_preference
+
+
 @pytest.mark.skipif(
     sys.platform.startswith(("li", "darwin")),
     reason="qtbot.waitActive times out on ubuntu/macOS",
