@@ -5,6 +5,8 @@ import tomllib
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
+
 from qtpy import QtCore
 from qtpy.QtCore import Qt
 from qtpy.QtWidgets import (
@@ -77,15 +79,93 @@ class CalibrationWorker(QtCore.QThread):
         corners = row.get("corners", None)
         return 0 if corners is None else len(corners)
 
+    @staticmethod
+    def _row_corner_xy(row: Dict) -> Optional[np.ndarray]:
+        """Return an ``(N, 2)`` array of a row's detected corner coordinates."""
+        corners = row.get("corners", None)
+        if corners is None:
+            return None
+        pts = np.asarray(corners, dtype="float64").reshape(-1, 2)
+        pts = pts[~np.isnan(pts).any(axis=1)]
+        return pts if len(pts) else None
+
     @classmethod
-    def _validate_rows(cls, all_rows: List[List[Dict]], camera_names: List[str]) -> None:
+    def _row_is_degenerate(
+        cls,
+        row: Dict,
+        *,
+        min_points: int = 4,
+        min_spread_ratio: float = 0.02,
+    ) -> bool:
+        """Return True if a row's corners are (near-)collinear.
+
+        ``cv2.initCameraMatrix2D`` estimates a board→image homography for every
+        frame it is handed and asserts the result is a 3×3 matrix.  A frame
+        whose detected ChArUco corners all fall on a single board row or column
+        produces an empty homography and aborts the whole calibration with a
+        raw OpenCV assertion (``matH0.size() == Size(3, 3)``).  Such frames hold
+        no usable calibration information, so they are dropped up front.
+
+        Rows with fewer than ``min_points`` corners are left for the existing
+        corner-count checks to handle and are not reported as collinear here.
+        """
+        pts = cls._row_corner_xy(row)
+        if pts is None or len(pts) < min_points:
+            return False
+        centered = pts - pts.mean(axis=0)
+        singular_values = np.linalg.svd(centered, compute_uv=False)
+        if singular_values[0] <= 0:
+            return True
+        return bool(singular_values[1] / singular_values[0] < min_spread_ratio)
+
+    @classmethod
+    def _filter_degenerate_rows(cls, all_rows: List[List[Dict]]) -> tuple:
+        """Drop (near-)collinear board detections that would break calibration.
+
+        Returns ``(filtered_rows, dropped_per_camera)`` where ``filtered_rows``
+        mirrors ``all_rows`` with degenerate rows removed and
+        ``dropped_per_camera`` is the per-camera count of removed rows.
+        """
+        filtered: List[List[Dict]] = []
+        dropped_per_camera: List[int] = []
+        for rows in all_rows:
+            kept = [row for row in rows if not cls._row_is_degenerate(row)]
+            filtered.append(kept)
+            dropped_per_camera.append(len(rows) - len(kept))
+        return filtered, dropped_per_camera
+
+    @classmethod
+    def _validate_rows(
+        cls,
+        all_rows: List[List[Dict]],
+        camera_names: List[str],
+        dropped_per_camera: Optional[List[int]] = None,
+    ) -> None:
         """Raise a readable error if board detection found no usable samples."""
+        if dropped_per_camera is None:
+            dropped_per_camera = [0] * len(camera_names)
+
+        def _collinear_hint(name: str) -> str:
+            dropped = dropped_per_camera[camera_names.index(name)]
+            if not dropped:
+                return ""
+            return (
+                f" ({dropped} near-collinear detection(s) were ignored — show "
+                "the board tilted and fully within the frame)"
+            )
+
         counts = [len(rows) for rows in all_rows]
         if sum(counts) == 0:
+            extra = (
+                " Every detection was too close to collinear to use."
+                if sum(dropped_per_camera) > 0
+                else ""
+            )
             raise ValueError(
-                "No ChArUco boards were detected in any calibration video. "
-                "Check that the videos open correctly, the board parameters match "
-                "your printed board, and the board is visible in the selected videos."
+                "No usable ChArUco boards were detected in any calibration "
+                "video." + extra + " Check that the videos open correctly, the "
+                "board parameters match your printed board, and the board is "
+                "visible — tilted and fully in frame — in the selected videos."
             )
 
         missing = [
@@ -94,9 +174,10 @@ class CalibrationWorker(QtCore.QThread):
         ]
         if missing:
             raise ValueError(
-                "No ChArUco boards were detected for camera(s): "
-                f"{', '.join(missing)}. "
-                "Each selected camera needs at least one usable board detection."
+                "No usable ChArUco boards were detected for camera(s): "
+                + ", ".join(name + _collinear_hint(name) for name in missing)
+                + ". Each selected camera needs at least one usable board "
+                "detection."
             )
 
         weak = [
@@ -106,9 +187,11 @@ class CalibrationWorker(QtCore.QThread):
         ]
         if weak:
             raise ValueError(
-                "Detected boards did not have enough ChArUco corners for intrinsic "
-                f"calibration in camera(s): {', '.join(weak)}. "
-                "Use clearer frames or verify board_x, board_y, marker_bits, and "
+                "Detected boards did not have enough non-collinear ChArUco "
+                "corners for intrinsic calibration in camera(s): "
+                + ", ".join(name + _collinear_hint(name) for name in weak)
+                + ". Use clearer frames with the board tilted and fully "
+                "visible, or verify board_x, board_y, marker_bits, and "
                 "dict_size."
             )
 
@@ -163,7 +246,18 @@ class CalibrationWorker(QtCore.QThread):
                     corners = cgroup.get_rows_videos(
                         calib_videos, board, verbose=True
                     )
-                    self._validate_rows(corners, self._camera_names)
+                    corners, dropped_per_cam = self._filter_degenerate_rows(
+                        corners
+                    )
+                    n_dropped = sum(dropped_per_cam)
+                    if n_dropped:
+                        self.logOutput.emit(
+                            f"Ignored {n_dropped} near-collinear board "
+                            "detection(s) unusable for calibration."
+                        )
+                    self._validate_rows(
+                        corners, self._camera_names, dropped_per_cam
+                    )
                     cgroup.set_camera_sizes_videos(calib_videos)
                     cgroup.calibrate_rows(corners, board)
                 except Exception as exc:
