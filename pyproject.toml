@@ -138,6 +138,7 @@ sleap-convert = "sleap.io.convert:main"
 sleap-render = "sleap.io.visuals:main" # deprecation warning
 sleap-label = "sleap.gui.app:main"
 sleap-inspect = "sleap.info.labels:main" # deprecation warning
+sleap-calibration-quality = "sleap.info.calibration:main"
 sleap-diagnostic = "sleap.diagnostic:main" # deprecation warning
 sleap-train = "sleap.legacy_cli_adaptors:train_command" # deprecation warning
 sleap-track = "sleap.legacy_cli_adaptors:track_command" # deprecation warning
